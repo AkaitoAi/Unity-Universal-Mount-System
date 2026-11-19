@@ -1,0 +1,28 @@
+# OS & Editor artifacts
+.DS_Store
+Thumbs.db
+*.user
+*.suo
+*.sln
+*.csproj
+*.pidb
+*.booproj
+*.svd
+*.pdb
+*.mdb
+*.opendb
+*.VC.db
+
+# IDE folders
+.vs/
+.vscode/
+.idea/
+
+# Unity generated folders (if opened directly in a project)
+[Ll]ibrary/
+[Tt]emp/
+[Oo]bj/
+[Bb]uild/
+[Bb]uilds/
+[Ll]ogs/
+[Uu]ser[Ss]ettings/
