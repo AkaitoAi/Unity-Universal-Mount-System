@@ -137,6 +137,12 @@ Implement `ICameraTargetable` on any camera script so `CameraAuthority` retarget
 
 ---
 
+## Troubleshooting
+
+- **Character stops or runs in place near a mount during approach:** Check whether your mount has child trigger colliders (e.g. near-miss or interaction zones) on a layer included in your third-person controller's wall-stop raycast mask (such as Invector's `stopMoveLayer`). Ensure your character controller's forward raycasts/capsulecasts pass `QueryTriggerInteraction.Ignore` (or set `Physics.queriesHitTriggers = false`), and enable `MountSessionSettingsSO.enableDebugLogs` to inspect approach coordinates in the Console.
+
+---
+
 ## License
 
 This project is licensed under the **MIT License** — see [LICENSE](LICENSE) for details.

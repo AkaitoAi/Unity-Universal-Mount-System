@@ -2,6 +2,11 @@
 
 All notable changes to the **Universal Mount System** package will be documented in this file.
 
+## [1.1.2] - 2026-11-19
+### Added
+- Added stuck-approach diagnostic logging (`charPos`, `rawDest`, `resolvedDest`, `planarToResolved`) in `MountInteractionPrompt` when `MountSessionSettingsSO.enableDebugLogs` is enabled.
+- Added Troubleshooting guidance in `README.md` for third-party character controllers whose wall-stop raycasts hit mount trigger volumes when `Physics.queriesHitTriggers` is enabled.
+
 ## [1.1.1] - 2026-11-19
 ### Fixed
 - Fixed automated approach stalling/oscillating beside tall, wide, or irregular mounts (e.g. lifted pickup trucks, monster trucks, or mounts with default center anchors):

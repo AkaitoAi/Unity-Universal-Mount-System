@@ -628,6 +628,10 @@ namespace AkaitoAi.UniversalMountSystem.UI
             }
             else if (Time.time - progressTime > Mathf.Max(0.5f, manager.Settings.approachStuckTimeout))
             {
+                if (manager.Settings.enableDebugLogs)
+                {
+                    Debug.LogWarning($"[MountInteractionPrompt] Approach cancelled (stuck timeout): target={approachTarget?.TargetId}, charPos={charPos}, rawDest={destination}, resolvedDest={resolvedDest}, planarToResolved={planarToResolved:F2}m");
+                }
                 CancelApproach();
                 return;
             }
