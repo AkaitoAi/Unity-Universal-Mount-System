@@ -361,14 +361,34 @@ namespace AkaitoAi.UniversalMountSystem.Services
                     : (seat.seatAnchor != null ? seat.seatAnchor : mountTarget.Transform);
 
                 float distToApproach = Vector3.Distance(characterPos, approachAnchor.position);
+                bool usesSurfaceFallback = false;
+                Vector3 surfacePoint = approachAnchor.position;
+
                 if (distToApproach > s.interactionRange)
                 {
-                    return FailTransition(0, $"Approach distance {distToApproach:F1}m exceeds interaction range {s.interactionRange}m", ControlMode.Mounted);
+                    float planarDistToApproach = new Vector2(approachAnchor.position.x - characterPos.x, approachAnchor.position.z - characterPos.z).magnitude;
+                    MountableControlAdapterBase mountBody = mountTarget as MountableControlAdapterBase;
+                    float surfaceDist = float.MaxValue;
+                    bool hasSurface = mountBody != null && mountBody.TryGetInteractionPoint(
+                        characterAdapter.CapsuleCollider,
+                        characterPos + Vector3.up,
+                        out surfacePoint,
+                        out surfaceDist);
+
+                    bool withinSurfaceFallback = hasSurface && surfaceDist <= s.interactionRange &&
+                                                 (planarDistToApproach <= s.interactionRange || approachAnchor == mountTarget.Transform);
+                    if (!withinSurfaceFallback)
+                    {
+                        return FailTransition(0, $"Approach distance {distToApproach:F1}m exceeds interaction range {s.interactionRange}m", ControlMode.Mounted);
+                    }
+                    usesSurfaceFallback = true;
                 }
 
-                // Line-of-sight check
+                // Line-of-sight check (height-clamped so tall cabs don't raycast into overhead ceilings)
                 Vector3 rayStart = characterPos + Vector3.up * 1.0f;
-                Vector3 rayEnd = approachAnchor.position + Vector3.up * 1.0f;
+                Vector3 rayEnd = usesSurfaceFallback
+                    ? surfacePoint
+                    : new Vector3(approachAnchor.position.x, Mathf.Clamp(approachAnchor.position.y + 0.5f, characterPos.y + 0.5f, characterPos.y + 1.8f), approachAnchor.position.z);
                 Vector3 rayDir = rayEnd - rayStart;
                 float rayDist = rayDir.magnitude;
                 if (rayDist > 0.25f)

@@ -23,6 +23,8 @@ namespace AkaitoAi.UniversalMountSystem.Services
         private readonly Vector3[] plannedLocalWaypoints = new Vector3[8];
         private readonly Vector3[] candidateLocalWaypoints = new Vector3[8];
         private readonly RaycastHit[] castHits = new RaycastHit[32];
+        private readonly Collider[] solidMountColliders = new Collider[32];
+        private int solidMountColliderCount;
 
         private Transform mountTransform;
         private Transform characterTransform;
@@ -45,6 +47,7 @@ namespace AkaitoAi.UniversalMountSystem.Services
         private float stallCheckTime;
 
         public float PlannedRouteLength { get; private set; }
+        public Vector3 ResolvedDestinationWorld { get; private set; }
 
         public void Initialize(
             Transform mount,
@@ -87,7 +90,12 @@ namespace AkaitoAi.UniversalMountSystem.Services
 
             if (character != null)
             {
-                PlanRoute(character.position, destinationWorld, 0, false);
+                Vector3 resolvedDest = ResolveDestination(character.position, destinationWorld);
+                PlanRoute(character.position, resolvedDest, 0, false);
+            }
+            else
+            {
+                ResolvedDestinationWorld = destinationWorld;
             }
         }
 
@@ -96,6 +104,7 @@ namespace AkaitoAi.UniversalMountSystem.Services
             mountTransform = null;
             characterTransform = null;
             hasBodyBounds = false;
+            solidMountColliderCount = 0;
             invScaleX = 1f;
             invScaleZ = 1f;
             plannedWaypointCount = 0;
@@ -105,14 +114,94 @@ namespace AkaitoAi.UniversalMountSystem.Services
             lastReplanTime = -10f;
             stallCheckTime = 0f;
             PlannedRouteLength = 0f;
+            ResolvedDestinationWorld = Vector3.zero;
+        }
+
+        /// <summary>
+        /// Projects an authored or default entry anchor onto a physically reachable exterior standpoint
+        /// clear of the mount's padded hull and wide fenders/wheels/mirrors.
+        /// Zero heap allocations.
+        /// </summary>
+        public Vector3 ResolveDestination(Vector3 currentWorld, Vector3 rawDestinationWorld)
+        {
+            if (!hasBodyBounds || mountTransform == null)
+            {
+                ResolvedDestinationWorld = rawDestinationWorld;
+                return rawDestinationWorld;
+            }
+
+            Vector3 endLocal = mountTransform.InverseTransformPoint(rawDestinationWorld);
+            Vector3 resolvedLocal = endLocal;
+
+            if (IsInsideBounds2D(endLocal, paddedBodyBounds))
+            {
+                float dxCenter = Mathf.Abs(endLocal.x - rawLocalBounds.center.x) / Mathf.Max(0.01f, invScaleX);
+                float dzCenter = Mathf.Abs(endLocal.z - rawLocalBounds.center.z) / Mathf.Max(0.01f, invScaleZ);
+                bool isNearCenter = dxCenter < 0.25f && dzCenter < 0.25f;
+
+                if (isNearCenter)
+                {
+                    Vector3 charLocal = mountTransform.InverseTransformPoint(currentWorld);
+                    resolvedLocal = ProjectOutsideBounds2DToward(endLocal, charLocal, paddedBodyBounds, EscapeMargin);
+                }
+                else
+                {
+                    resolvedLocal = ProjectOutsideBounds2D(endLocal, paddedBodyBounds, EscapeMargin);
+                }
+            }
+
+            Vector3 standWorld = LocalToWorldAtHeight(resolvedLocal, currentWorld.y);
+
+            float probeHeight = Mathf.Clamp(capsuleHeight * 0.5f, 0.5f, 1.2f);
+            float minClearance = capsuleRadius + 0.12f;
+            float pushClearance = capsuleRadius + 0.14f;
+
+            for (int pass = 0; pass < 2; pass++)
+            {
+                bool adjusted = false;
+                Vector3 probePoint = standWorld + Vector3.up * probeHeight;
+                for (int i = 0; i < solidMountColliderCount; i++)
+                {
+                    Collider col = solidMountColliders[i];
+                    if (col == null || !col.enabled || col.isTrigger || !col.gameObject.activeInHierarchy) continue;
+
+                    Vector3 closest = col.ClosestPoint(probePoint);
+                    Vector3 delta = standWorld - closest;
+                    delta.y = 0f;
+                    float dist = delta.magnitude;
+                    if (dist < minClearance)
+                    {
+                        Vector3 pushDir;
+                        if (dist > 0.001f)
+                        {
+                            pushDir = delta / dist;
+                        }
+                        else
+                        {
+                            Vector3 fromMount = standWorld - mountTransform.position;
+                            fromMount.y = 0f;
+                            pushDir = fromMount.sqrMagnitude > 0.001f ? fromMount.normalized : -mountTransform.right;
+                        }
+                        standWorld = new Vector3(closest.x, currentWorld.y, closest.z) + pushDir * pushClearance;
+                        adjusted = true;
+                    }
+                }
+                if (!adjusted) break;
+            }
+
+            ResolvedDestinationWorld = standWorld;
+            return standWorld;
         }
 
         public Vector3 ResolveNextTarget(Vector3 currentWorld, Vector3 destinationWorld)
         {
             if (!hasBodyBounds || mountTransform == null)
             {
+                ResolvedDestinationWorld = destinationWorld;
                 return destinationWorld;
             }
+
+            Vector3 resolvedDest = ResolveDestination(currentWorld, destinationWorld);
 
             Vector3 stallDelta = currentWorld - stallCheckPosition;
             stallDelta.y = 0f;
@@ -124,21 +213,21 @@ namespace AkaitoAi.UniversalMountSystem.Services
             else if (Time.time - stallCheckTime >= StallReplanSeconds && Time.time - lastReplanTime >= ReplanCooldown)
             {
                 bool headingToFinalEntry = currentWaypointIndex >= plannedWaypointCount;
-                Vector3 desiredNow = GetCurrentPlannedTargetWorld(currentWorld, destinationWorld);
+                Vector3 desiredNow = GetCurrentPlannedTargetWorld(currentWorld, resolvedDest);
                 if (!IsWorldBlockingAhead(currentWorld, desiredNow) &&
                     (IsMountBlockingAhead(currentWorld, desiredNow, headingToFinalEntry, out _) || IsNearMountSurface(currentWorld)))
                 {
                     int alternateDirection = committedDirection != 0 ? -committedDirection : 1;
                     extraClearance = Mathf.Min(extraClearance + 0.45f, MaxExtraClearance);
                     RebuildPaddedBoundsAndCorners();
-                    PlanRoute(currentWorld, destinationWorld, alternateDirection, true);
+                    PlanRoute(currentWorld, resolvedDest, alternateDirection, true);
                     lastReplanTime = Time.time;
                     stallCheckTime = Time.time;
                 }
             }
 
             Vector3 currentLocal = mountTransform.InverseTransformPoint(currentWorld);
-            Vector3 endLocal = mountTransform.InverseTransformPoint(destinationWorld);
+            Vector3 endLocal = mountTransform.InverseTransformPoint(resolvedDest);
 
             while (currentWaypointIndex < plannedWaypointCount)
             {
@@ -150,7 +239,7 @@ namespace AkaitoAi.UniversalMountSystem.Services
                 }
 
                 if (!CrossesBounds2D(currentLocal, endLocal, paddedBodyBounds) &&
-                    !IsSegmentBlockedByMount(currentWorld, destinationWorld, true, out _))
+                    !IsSegmentBlockedByMount(currentWorld, resolvedDest, true, out _))
                 {
                     currentWaypointIndex = plannedWaypointCount;
                     break;
@@ -160,7 +249,12 @@ namespace AkaitoAi.UniversalMountSystem.Services
             }
 
             bool isFinalLeg = currentWaypointIndex >= plannedWaypointCount;
-            Vector3 targetWorld = GetCurrentPlannedTargetWorld(currentWorld, destinationWorld);
+            Vector3 targetWorld = GetCurrentPlannedTargetWorld(currentWorld, resolvedDest);
+
+            if (isFinalLeg && PlanarDistance(currentWorld, resolvedDest) <= Mathf.Max(WaypointReachRadius, capsuleRadius + 0.45f))
+            {
+                return resolvedDest;
+            }
 
             if (IsMountBlockingAhead(currentWorld, targetWorld, isFinalLeg, out _))
             {
@@ -172,10 +266,10 @@ namespace AkaitoAi.UniversalMountSystem.Services
                         RebuildPaddedBoundsAndCorners();
                     }
 
-                    PlanRoute(currentWorld, destinationWorld, committedDirection, true);
+                    PlanRoute(currentWorld, resolvedDest, committedDirection, true);
                     lastReplanTime = Time.time;
                     isFinalLeg = currentWaypointIndex >= plannedWaypointCount;
-                    targetWorld = GetCurrentPlannedTargetWorld(currentWorld, destinationWorld);
+                    targetWorld = GetCurrentPlannedTargetWorld(currentWorld, resolvedDest);
                 }
 
                 if (IsMountBlockingAhead(currentWorld, targetWorld, isFinalLeg, out RaycastHit postReplanHit))
@@ -200,6 +294,7 @@ namespace AkaitoAi.UniversalMountSystem.Services
         private void CacheTightLocalBounds(Transform mount)
         {
             hasBodyBounds = false;
+            solidMountColliderCount = 0;
             Collider[] colliders = mount.GetComponentsInChildren<Collider>();
             for (int i = 0; i < colliders.Length; i++)
             {
@@ -207,6 +302,13 @@ namespace AkaitoAi.UniversalMountSystem.Services
                 if (col == null || !col.enabled || col.isTrigger || col is WheelCollider)
                 {
                     continue;
+                }
+
+                bool supportsClosestPoint = col is BoxCollider || col is SphereCollider || col is CapsuleCollider ||
+                    (col is MeshCollider mc && mc.convex && mc.sharedMesh != null);
+                if (supportsClosestPoint && solidMountColliderCount < solidMountColliders.Length)
+                {
+                    solidMountColliders[solidMountColliderCount++] = col;
                 }
 
                 if (TryGetColliderLocalBounds(col, out Vector3 localCenter, out Vector3 localExtents))
@@ -576,7 +678,7 @@ namespace AkaitoAi.UniversalMountSystem.Services
             float probeRadius = Mathf.Max(0.15f, capsuleRadius * 0.85f);
             if (trimEndpoint)
             {
-                distance -= Mathf.Max(0.15f, probeRadius);
+                distance -= Mathf.Max(0.25f, probeRadius + 0.15f);
             }
             if (distance < 0.05f)
             {
@@ -730,6 +832,32 @@ namespace AkaitoAi.UniversalMountSystem.Services
             float dx = a.x - b.x;
             float dz = a.z - b.z;
             return Mathf.Sqrt(dx * dx + dz * dz);
+        }
+
+        private Vector3 ProjectOutsideBounds2DToward(Vector3 point, Vector3 towardLocal, Bounds bounds, float worldMargin)
+        {
+            float marginX = worldMargin * invScaleX;
+            float marginZ = worldMargin * invScaleZ;
+            Vector3 clamped = new Vector3(
+                Mathf.Clamp(towardLocal.x, bounds.min.x, bounds.max.x),
+                0f,
+                Mathf.Clamp(towardLocal.z, bounds.min.z, bounds.max.z));
+
+            float dx = towardLocal.x - bounds.center.x;
+            float dz = towardLocal.z - bounds.center.z;
+            float halfX = Mathf.Max(0.01f, bounds.extents.x);
+            float halfZ = Mathf.Max(0.01f, bounds.extents.z);
+
+            if (Mathf.Abs(dx) / halfX >= Mathf.Abs(dz) / halfZ)
+            {
+                clamped.x = dx >= 0f ? bounds.max.x + marginX : bounds.min.x - marginX;
+            }
+            else
+            {
+                clamped.z = dz >= 0f ? bounds.max.z + marginZ : bounds.min.z - marginZ;
+            }
+
+            return clamped;
         }
 
         private Vector3 ProjectOutsideBounds2D(Vector3 point, Bounds bounds, float worldMargin)

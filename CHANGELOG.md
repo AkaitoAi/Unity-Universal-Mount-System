@@ -2,6 +2,13 @@
 
 All notable changes to the **Universal Mount System** package will be documented in this file.
 
+## [1.1.1] - 2026-11-19
+### Fixed
+- Fixed automated approach stalling/oscillating beside tall, wide, or irregular mounts (e.g. lifted pickup trucks, monster trucks, or mounts with default center anchors):
+  - `MountApproachPathResolver.ResolveDestination` now projects interior/overhung entry anchors onto a guaranteed-clear exterior standpoint refined against actual mount colliders (zero per-tick heap allocations) and suppresses final-leg repulsion oscillation.
+  - `MountInteractionPrompt` checks arrival against `ResolvedDestinationWorld` with generous vertical reach for elevated cabs/saddles.
+  - `MountSessionManager.RequestEnter` supports surface-aware distance fallback and height-clamped line-of-sight rays for tall/wide mounts.
+
 ## [1.1.0] - 2026-11-19
 ### Added
 - `SeatAttachmentMode.FollowAnchor` (default) on `GenericCharacterControlAdapter` so characters survive mid-ride `Destroy(mount)` and never suffer non-uniform mount scale distortion.

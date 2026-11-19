@@ -501,17 +501,34 @@ namespace AkaitoAi.UniversalMountSystem.UI
                 Mathf.Max(0.5f, manager.Settings.interactionRange),
                 Mathf.Max(0.2f, manager.Settings.approachStoppingDistance));
 
-            float straightDistance = Vector3.Distance(character.transform.position, entryPosition);
+            Vector3 charPos = character.transform.position;
+            approachPathResolver.Initialize(
+                target.Transform,
+                character.transform,
+                character.CapsuleCollider,
+                manager.Settings.characterCapsuleRadius,
+                manager.Settings.characterCapsuleHeight,
+                manager.Settings.obstacleLayerMask,
+                entryPosition);
+
+            Vector3 resolvedEntry = approachPathResolver.ResolvedDestinationWorld;
+            float straightDistance = Vector3.Distance(charPos, entryPosition);
+            float planarToResolved = new Vector2(resolvedEntry.x - charPos.x, resolvedEntry.z - charPos.z).magnitude;
+            float maxVerticalReach = Mathf.Max(2.5f, manager.Settings.interactionRange);
+            bool alreadyAtStandpoint = straightDistance <= stoppingDistance ||
+                                       (planarToResolved <= stoppingDistance && Mathf.Abs(entryPosition.y - charPos.y) <= maxVerticalReach);
 
             ICharacterApproachDriver driver = character.GetCapability<ICharacterApproachDriver>();
-            if (straightDistance <= stoppingDistance || driver == null || !driver.CanStartApproach)
+            if (alreadyAtStandpoint || driver == null || !driver.CanStartApproach)
             {
+                approachPathResolver.Reset();
                 manager.RequestEnter(target, seat);
                 return;
             }
 
             if (!driver.BeginApproachDrive())
             {
+                approachPathResolver.Reset();
                 manager.RequestEnter(target, seat);
                 return;
             }
@@ -521,17 +538,8 @@ namespace AkaitoAi.UniversalMountSystem.UI
             approachDriver = driver;
             initialManualInput = driver.ReadManualMovementInput();
             manualInputReleased = initialManualInput.sqrMagnitude < 0.04f;
-            progressPosition = character.transform.position;
+            progressPosition = charPos;
             progressTime = approachStartedTime = Time.time;
-
-            approachPathResolver.Initialize(
-                target.Transform,
-                character.transform,
-                character.CapsuleCollider,
-                manager.Settings.characterCapsuleRadius,
-                manager.Settings.characterCapsuleHeight,
-                manager.Settings.obstacleLayerMask,
-                entryPosition);
 
             approachMaximumDistance = Mathf.Max(straightDistance + 3f, approachPathResolver.PlannedRouteLength + 4f);
         }
@@ -579,10 +587,13 @@ namespace AkaitoAi.UniversalMountSystem.UI
                 : approachTarget.Transform;
             Vector3 destination = anchor != null ? anchor.position : approachTarget.Transform.position;
             Vector3 charPos = manager.CharacterAdapter.transform.position;
+            Vector3 resolvedDest = approachPathResolver.ResolveDestination(charPos, destination);
 
             Vector3 deltaToDest = destination - charPos;
             float distance = deltaToDest.magnitude;
             float planarDistance = new Vector2(deltaToDest.x, deltaToDest.z).magnitude;
+            Vector3 deltaToResolved = resolvedDest - charPos;
+            float planarToResolved = new Vector2(deltaToResolved.x, deltaToResolved.z).magnitude;
             float dynamicMaxDistance = Mathf.Max(approachMaximumDistance, approachPathResolver.PlannedRouteLength + 4f);
 
             if (distance > dynamicMaxDistance || Time.time - approachStartedTime > 20f)
@@ -595,8 +606,11 @@ namespace AkaitoAi.UniversalMountSystem.UI
                 Mathf.Max(0.5f, manager.Settings.interactionRange),
                 Mathf.Max(0.2f, manager.Settings.approachStoppingDistance));
 
+            float maxVerticalReach = Mathf.Max(2.5f, manager.Settings.interactionRange);
+            bool verticalOk = Mathf.Abs(deltaToDest.y) <= maxVerticalReach;
             bool reachedEntry = distance <= stoppingDistance ||
-                                (planarDistance <= stoppingDistance && Mathf.Abs(deltaToDest.y) <= 1.5f && distance <= manager.Settings.interactionRange);
+                                (planarToResolved <= stoppingDistance && verticalOk) ||
+                                (planarDistance <= stoppingDistance && verticalOk);
 
             if (reachedEntry)
             {
