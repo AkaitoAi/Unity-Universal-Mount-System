@@ -18,11 +18,14 @@ namespace AkaitoAi.UniversalMountSystem.Configuration
         [Tooltip("Cancel an automated approach if the character cannot make progress for this many seconds.")]
         [Min(0.5f)] public float approachStuckTimeout = 3f;
 
-        [Tooltip("Maximum mount speed in km/h to allow boarding.")]
+        [Tooltip("Default maximum mount speed in km/h to allow boarding (can be overridden per-mount).")]
         [Min(0f)] public float maxBoardingSpeedKmh = 5.0f;
 
-        [Tooltip("Maximum mount speed in km/h to allow safe normal exit.")]
+        [Tooltip("Default maximum mount speed in km/h to allow safe normal exit (can be overridden per-mount).")]
         [Min(0f)] public float maxExitSpeedKmh = 5.0f;
+
+        [Tooltip("If true, walking into proximity of a valid mount automatically triggers boarding without pressing a key.")]
+        public bool allowProximityAutoEntry = false;
 
         [Header("Moving Exit (Optional)")]
         [Tooltip("Allow a moving bailout above maxExitSpeedKmh when the character adapter supports CanExitMoving.")]
@@ -53,9 +56,6 @@ namespace AkaitoAi.UniversalMountSystem.Configuration
         [Tooltip("Maximum seconds an unmounted mount may coast before parking.")]
         [Min(0.5f)] public float mountCoastMaxDuration = 4.0f;
 
-        [Tooltip("Require explicit button press to enter; proximity alone will not auto-enter.")]
-        public bool allowProximityAutoEntry = false;
-
         [Header("Exit Clearance & Safety Checks")]
         [Tooltip("Capsule radius used for exit clearance sweep/overlap testing against walls and obstacles.")]
         [Min(0.1f)] public float characterCapsuleRadius = 0.4f;
@@ -75,13 +75,7 @@ namespace AkaitoAi.UniversalMountSystem.Configuration
         [Tooltip("Layer mask for obstacle and wall collision testing on exit and line-of-sight.")]
         public LayerMask obstacleLayerMask = ~0;
 
-        [Header("Transaction & Diagnostics")]
-        [Tooltip("Timeout in seconds before an incomplete transition rolls back.")]
-        [Min(1f)] public float transitionTimeoutSeconds = 3.0f;
-
-        [Tooltip("Whether transition timeouts evaluate using unscaled time.")]
-        public bool useUnscaledTime = true;
-
+        [Header("Diagnostics")]
         public bool enableDebugLogs = false;
     }
 }

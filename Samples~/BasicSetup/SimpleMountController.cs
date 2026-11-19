@@ -23,13 +23,18 @@ namespace AkaitoAi.UniversalMountSystem.Samples
 
         private void FixedUpdate()
         {
-            float throttle = Input.GetAxis("Vertical");
-            float steer = Input.GetAxis("Horizontal");
+            float throttle = 0f;
+            float steer = 0f;
+#if ENABLE_LEGACY_INPUT_MANAGER
+            throttle = Input.GetAxis("Vertical");
+            steer = Input.GetAxis("Horizontal");
+#endif
 
-            Vector3 planarVel = new Vector3(rb.velocity.x, 0f, rb.velocity.z);
+            Vector3 currentVel = UnityCompat.GetLinearVelocity(rb);
+            Vector3 planarVel = new Vector3(currentVel.x, 0f, currentVel.z);
             Vector3 targetVel = transform.forward * (throttle * maxSpeed);
             Vector3 nextPlanar = Vector3.MoveTowards(planarVel, targetVel, acceleration * Time.fixedDeltaTime);
-            rb.velocity = new Vector3(nextPlanar.x, rb.velocity.y, nextPlanar.z);
+            UnityCompat.SetLinearVelocity(rb, new Vector3(nextPlanar.x, currentVel.y, nextPlanar.z));
 
             if (Mathf.Abs(steer) > 0.01f)
             {

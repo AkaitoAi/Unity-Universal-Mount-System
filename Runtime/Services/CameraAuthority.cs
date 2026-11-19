@@ -7,8 +7,8 @@ namespace AkaitoAi.UniversalMountSystem.Services
     /// <summary>
     /// Controller-agnostic camera and audio listener coordinator.
     /// Switches cleanly between the default On-Foot rig, default Mounted rig, per-target custom
-    /// <see cref="ICameraRigProvider"/> rigs, or named additional rigs, guaranteeing exactly one
-    /// active MainCamera and one active AudioListener at any time.
+    /// <see cref="ICameraRigProvider"/> rigs (including Cinemachine 2/3 virtual cameras that share MainCamera),
+    /// or named additional rigs, guaranteeing single MainCamera and AudioListener exclusivity.
     /// </summary>
     [DisallowMultipleComponent]
     public class CameraAuthority : MonoBehaviour
@@ -78,11 +78,7 @@ namespace AkaitoAi.UniversalMountSystem.Services
 
         /// <summary>
         /// Switches camera & audio authority to any <see cref="IControlTarget"/>.
-        /// Priority:
-        /// 1) Target's own <see cref="ICameraRigProvider"/> custom rig.
-        /// 2) Matching entry in <see cref="additionalCameraRigs"/> by TargetId.
-        /// 3) Mode default rig (<see cref="defaultMountedCameraRig"/> or <see cref="onFootCameraRig"/>).
-        /// 4) Fallback: rebind the current On-Foot camera to the target (single-camera games).
+        /// Supports both separate Camera rigs and virtual cameras (e.g. Cinemachine) that share MainCamera.
         /// </summary>
         public void SwitchToTarget(IControlTarget target, ControlMode mode)
         {
@@ -91,7 +87,7 @@ namespace AkaitoAi.UniversalMountSystem.Services
 
             ICameraRigProvider rigProvider = target != null ? target.GetCapability<ICameraRigProvider>() : null;
             ICameraRigAdapter customRig = rigProvider != null ? rigProvider.CameraRig : null;
-            if (customRig != null && customRig.OutputCamera != null)
+            if (customRig != null && customRig.IsConfigured)
             {
                 ActivateRig(customRig, targetTransform);
                 return;
@@ -124,27 +120,33 @@ namespace AkaitoAi.UniversalMountSystem.Services
         }
 
         /// <summary>
-        /// Activates the given <see cref="ICameraRigAdapter"/> while deactivating all other managed rigs
-        /// and enforcing single AudioListener exclusivity.
+        /// Activates the given <see cref="ICameraRigAdapter"/> while deactivating all other managed rigs.
+        /// If the incoming rig has no dedicated <c>OutputCamera</c> (e.g. a Cinemachine virtual camera),
+        /// existing output Cameras are preserved so MainCamera is never disabled.
         /// </summary>
         public void ActivateRig(ICameraRigAdapter rig, Transform targetTransform)
         {
             if (rig == null) return;
             ResolveDefaultRigs();
 
+            Camera incomingCam = rig.OutputCamera;
+
             if (activeRigAdapter != null && !ReferenceEquals(activeRigAdapter, rig))
             {
-                activeRigAdapter.DeactivateRig();
+                bool deactivateOldCam = incomingCam != null && incomingCam != activeRigAdapter.OutputCamera;
+                activeRigAdapter.DeactivateRig(deactivateOldCam);
             }
 
             if (onFootCameraRig != null && !ReferenceEquals(onFootCameraRig, rig))
             {
-                onFootCameraRig.DeactivateRig();
+                bool deactivateCam = incomingCam != null && incomingCam != onFootCameraRig.OutputCamera;
+                onFootCameraRig.DeactivateRig(deactivateCam);
             }
 
             if (defaultMountedCameraRig != null && !ReferenceEquals(defaultMountedCameraRig, rig))
             {
-                defaultMountedCameraRig.DeactivateRig();
+                bool deactivateCam = incomingCam != null && incomingCam != defaultMountedCameraRig.OutputCamera;
+                defaultMountedCameraRig.DeactivateRig(deactivateCam);
             }
 
             if (additionalCameraRigs != null)
@@ -154,7 +156,8 @@ namespace AkaitoAi.UniversalMountSystem.Services
                     ControlCameraRig other = additionalCameraRigs[i];
                     if (other != null && !ReferenceEquals(other, rig))
                     {
-                        other.DeactivateRig();
+                        bool deactivateCam = incomingCam != null && incomingCam != other.OutputCamera;
+                        other.DeactivateRig(deactivateCam);
                     }
                 }
             }
@@ -163,9 +166,9 @@ namespace AkaitoAi.UniversalMountSystem.Services
             rig.ActivateRig();
 
             activeRigAdapter = rig;
-            if (rig.OutputCamera != null)
+            if (incomingCam != null)
             {
-                activeCamera = rig.OutputCamera;
+                activeCamera = incomingCam;
             }
 
             VerifyExclusivity();
@@ -205,7 +208,7 @@ namespace AkaitoAi.UniversalMountSystem.Services
         public bool VerifyExclusivity()
         {
             ResolveDefaultRigs();
-            AudioListener[] listeners = Resources.FindObjectsOfTypeAll<AudioListener>();
+            AudioListener[] listeners = UnityCompat.FindAllObjects<AudioListener>(false);
             AudioListener desired = activeRigAdapter != null && activeRigAdapter.AudioListener != null
                 ? activeRigAdapter.AudioListener
                 : (onFootCameraRig != null ? onFootCameraRig.AudioListener : null);
@@ -213,7 +216,7 @@ namespace AkaitoAi.UniversalMountSystem.Services
             int activeListeners = 0;
             for (int i = 0; i < listeners.Length; i++)
             {
-                if (listeners[i].gameObject.scene.isLoaded && listeners[i].enabled && listeners[i].gameObject.activeInHierarchy)
+                if (listeners[i] != null && listeners[i].enabled && listeners[i].gameObject.activeInHierarchy)
                 {
                     activeListeners++;
                 }
@@ -223,11 +226,12 @@ namespace AkaitoAi.UniversalMountSystem.Services
             {
                 for (int i = 0; i < listeners.Length; i++)
                 {
-                    if (listeners[i].gameObject.scene.isLoaded)
+                    if (listeners[i] != null)
                     {
                         listeners[i].enabled = listeners[i] == desired;
                     }
                 }
+                desired.enabled = true;
                 activeListeners = desired.enabled && desired.gameObject.activeInHierarchy ? 1 : 0;
             }
 

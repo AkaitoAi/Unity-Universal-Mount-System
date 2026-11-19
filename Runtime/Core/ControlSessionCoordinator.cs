@@ -6,8 +6,8 @@ namespace AkaitoAi.UniversalMountSystem
 {
     /// <summary>
     /// Pure C# single-authority coordinator for local player control session transitions and leases.
-    /// Manages state transitions, lease ownership tracking, rollbacks, and versioned context snapshots
-    /// independently of any character controller or mount implementation.
+    /// Manages state transitions, seat switching, lease ownership tracking, rollbacks, and versioned
+    /// context snapshots independently of any character controller or mount implementation.
     /// </summary>
     public class ControlSessionCoordinator
     {
@@ -39,16 +39,7 @@ namespace AkaitoAi.UniversalMountSystem
         /// </summary>
         public Func<bool> IsInputAllowed { get; set; }
 
-        /// <summary>
-        /// Raised when a transition commits.
-        /// Parameters: (PreviousContext, NewContext, TransitionReason).
-        /// </summary>
         public event Action<ControlContext, ControlContext, string> OnContextCommitted;
-
-        /// <summary>
-        /// Raised when a transition fails or is cancelled.
-        /// Parameters: (TransactionId, Reason, RequestedMode).
-        /// </summary>
         public event Action<long, string, ControlMode> OnTransitionFailed;
 
         private void SetTargetInputActive(IControlTarget target, bool active)
@@ -64,9 +55,6 @@ namespace AkaitoAi.UniversalMountSystem
             }
         }
 
-        /// <summary>
-        /// Idempotent session initialization. Establishes the initial OnFoot control context and lease.
-        /// </summary>
         public void Initialize(string playerId, GameObject body, IControlTarget bodyTarget, Camera initialCamera, Transform activityAnchor = null)
         {
             if (body == null && bodyTarget == null)
@@ -130,10 +118,6 @@ namespace AkaitoAi.UniversalMountSystem
             OnContextCommitted?.Invoke(previous, currentContext, "Initialized");
         }
 
-        /// <summary>
-        /// Requests a transactional handoff from OnFoot to Mounted.
-        /// Lease acquisition is a reservation only; activation occurs upon successful commit.
-        /// </summary>
         public ControlTransitionResult RequestTransitionToMounted(
             IControlTarget mountTarget,
             MountSeat targetSeat,
@@ -198,7 +182,7 @@ namespace AkaitoAi.UniversalMountSystem
             long txId = ++transactionCounter;
             activeTransactionId = txId;
 
-            prospectiveTarget = mountTarget;
+            prospectiveTarget = seat.grantsControlLease ? mountTarget : null;
             prospectiveSeat = seat;
             prospectiveMountable = mountable;
 
@@ -214,7 +198,7 @@ namespace AkaitoAi.UniversalMountSystem
                 return ControlTransitionResult.Failed(txId, reserveFail, ControlMode.Mounted);
             }
 
-            if (!mountTarget.AcquireControlLease(txId))
+            if (seat.grantsControlLease && !mountTarget.AcquireControlLease(txId))
             {
                 CleanupProspectiveReservations(txId);
                 phase = TransitionPhase.Ready;
@@ -255,21 +239,11 @@ namespace AkaitoAi.UniversalMountSystem
             if (!prepared)
             {
                 phase = TransitionPhase.RollingBack;
-                try
-                {
-                    rollbackCallback?.Invoke();
-                }
-                catch (Exception ex)
-                {
-                    Debug.LogError($"[ControlSessionCoordinator] Rollback callback exception: {ex}");
-                }
+                try { rollbackCallback?.Invoke(); }
+                catch (Exception ex) { Debug.LogError($"[ControlSessionCoordinator] Rollback callback exception: {ex}"); }
 
                 CleanupProspectiveReservations(txId);
-
-                if (sourceTarget != null && sourceTarget.IsValid)
-                {
-                    SetTargetInputActive(sourceTarget, true);
-                }
+                if (sourceTarget != null && sourceTarget.IsValid) SetTargetInputActive(sourceTarget, true);
 
                 phase = TransitionPhase.Ready;
                 activeTransactionId = 0;
@@ -294,21 +268,11 @@ namespace AkaitoAi.UniversalMountSystem
             if (!commitSucceeded)
             {
                 phase = TransitionPhase.RollingBack;
-                try
-                {
-                    rollbackCallback?.Invoke();
-                }
-                catch (Exception ex)
-                {
-                    Debug.LogError($"[ControlSessionCoordinator] Rollback callback exception after commit failure: {ex}");
-                }
+                try { rollbackCallback?.Invoke(); }
+                catch (Exception ex) { Debug.LogError($"[ControlSessionCoordinator] Rollback callback exception after commit failure: {ex}"); }
 
                 CleanupProspectiveReservations(txId);
-
-                if (sourceTarget != null && sourceTarget.IsValid)
-                {
-                    SetTargetInputActive(sourceTarget, true);
-                }
+                if (sourceTarget != null && sourceTarget.IsValid) SetTargetInputActive(sourceTarget, true);
 
                 phase = TransitionPhase.Ready;
                 activeTransactionId = 0;
@@ -324,27 +288,27 @@ namespace AkaitoAi.UniversalMountSystem
                 sourceTarget.ReleaseControlLease(activeLeaseId);
             }
 
-            activeLeaseId = txId;
-            activeLeaseTarget = mountTarget;
+            if (seat.grantsControlLease)
+            {
+                activeLeaseId = txId;
+                activeLeaseTarget = mountTarget;
+                SetTargetInputActive(mountTarget, true);
+            }
+            else
+            {
+                activeLeaseId = 0;
+                activeLeaseTarget = null;
+            }
+
             prospectiveTarget = null;
             prospectiveSeat = null;
             prospectiveMountable = null;
 
-            SetTargetInputActive(mountTarget, true);
-
             ControlContext previous = currentContext;
             contextVersion++;
             var protectedAnchors = new List<Transform>();
-            if (currentContext.Body != null)
-            {
-                protectedAnchors.Add(currentContext.Body.transform);
-            }
-            if (mountTarget != null && mountTarget.Transform != null)
-            {
-                protectedAnchors.Add(mountTarget.Transform);
-            }
-
-            Transform mountAnchor = mountTarget != null ? mountTarget.Transform : null;
+            if (currentContext.Body != null) protectedAnchors.Add(currentContext.Body.transform);
+            if (mountTarget != null && mountTarget.Transform != null) protectedAnchors.Add(mountTarget.Transform);
 
             currentContext = new ControlContext(
                 contextVersion,
@@ -355,7 +319,7 @@ namespace AkaitoAi.UniversalMountSystem
                 ControlMode.Mounted,
                 seat,
                 mountCamera != null ? mountCamera : previous.ActiveCamera,
-                mountAnchor,
+                mountTarget.Transform,
                 protectedAnchors
             );
 
@@ -367,8 +331,152 @@ namespace AkaitoAi.UniversalMountSystem
         }
 
         /// <summary>
-        /// Requests a transactional handoff from Mounted to OnFoot.
+        /// Switches seats within the currently occupied mount (e.g. Passenger to Driver or Driver to Gunner).
         /// </summary>
+        public ControlTransitionResult RequestSwitchSeat(
+            MountSeat targetSeat,
+            Func<bool> prepareCallback,
+            Action commitCallback,
+            Action rollbackCallback)
+        {
+            if (phase != TransitionPhase.Ready)
+            {
+                string busyReason = $"Coordinator busy in phase: {phase}";
+                OnTransitionFailed?.Invoke(0, busyReason, ControlMode.Mounted);
+                return ControlTransitionResult.Failed(0, busyReason, ControlMode.Mounted);
+            }
+
+            if (currentContext.Mode != ControlMode.Mounted || currentContext.ControlledTarget == null || !currentContext.ControlledTarget.IsValid)
+            {
+                string modeReason = "Cannot switch seat when not mounted";
+                OnTransitionFailed?.Invoke(0, modeReason, ControlMode.Mounted);
+                return ControlTransitionResult.Failed(0, modeReason, ControlMode.Mounted);
+            }
+
+            MountSeat currentSeat = currentContext.OccupiedSeat;
+            if (targetSeat == null || targetSeat == currentSeat)
+            {
+                string sameReason = "Target seat is null or already occupied by this character";
+                OnTransitionFailed?.Invoke(0, sameReason, ControlMode.Mounted);
+                return ControlTransitionResult.Failed(0, sameReason, ControlMode.Mounted);
+            }
+
+            IControlTarget mountTarget = currentContext.ControlledTarget;
+            IMountable mountable = mountTarget.GetCapability<IMountable>();
+            if (mountable == null)
+            {
+                string noMountReason = "Active mount does not support IMountable";
+                OnTransitionFailed?.Invoke(0, noMountReason, ControlMode.Mounted);
+                return ControlTransitionResult.Failed(0, noMountReason, ControlMode.Mounted);
+            }
+
+            long txId = ++transactionCounter;
+            activeTransactionId = txId;
+            prospectiveSeat = targetSeat;
+            prospectiveMountable = mountable;
+            phase = TransitionPhase.Validating;
+
+            if (!mountable.ReserveSeat(targetSeat, currentContext.Body, txId))
+            {
+                CleanupProspectiveReservations(txId);
+                phase = TransitionPhase.Ready;
+                activeTransactionId = 0;
+                string reserveFail = "Target seat is occupied or unavailable";
+                OnTransitionFailed?.Invoke(txId, reserveFail, ControlMode.Mounted);
+                return ControlTransitionResult.Failed(txId, reserveFail, ControlMode.Mounted);
+            }
+
+            bool needsNewLease = targetSeat.grantsControlLease && activeLeaseTarget != mountTarget;
+            if (needsNewLease)
+            {
+                prospectiveTarget = mountTarget;
+                if (!mountTarget.AcquireControlLease(txId))
+                {
+                    CleanupProspectiveReservations(txId);
+                    phase = TransitionPhase.Ready;
+                    activeTransactionId = 0;
+                    string leaseFail = "Failed to acquire control lease for target seat";
+                    OnTransitionFailed?.Invoke(txId, leaseFail, ControlMode.Mounted);
+                    return ControlTransitionResult.Failed(txId, leaseFail, ControlMode.Mounted);
+                }
+            }
+
+            phase = TransitionPhase.Preparing;
+            bool prepared;
+            try { prepared = prepareCallback == null || prepareCallback(); }
+            catch (Exception ex) { Debug.LogError($"[ControlSessionCoordinator] Seat switch prepare exception: {ex}"); prepared = false; }
+
+            if (!prepared)
+            {
+                phase = TransitionPhase.RollingBack;
+                try { rollbackCallback?.Invoke(); } catch (Exception ex) { Debug.LogError(ex); }
+                CleanupProspectiveReservations(txId);
+                phase = TransitionPhase.Ready;
+                activeTransactionId = 0;
+                string prepFail = "Preparation failed during seat switch";
+                OnTransitionFailed?.Invoke(txId, prepFail, ControlMode.Mounted);
+                return ControlTransitionResult.Failed(txId, prepFail, ControlMode.Mounted);
+            }
+
+            phase = TransitionPhase.Committing;
+            try { commitCallback?.Invoke(); }
+            catch (Exception ex)
+            {
+                Debug.LogError($"[ControlSessionCoordinator] Seat switch commit exception: {ex}");
+                phase = TransitionPhase.RollingBack;
+                try { rollbackCallback?.Invoke(); } catch (Exception rEx) { Debug.LogError(rEx); }
+                CleanupProspectiveReservations(txId);
+                phase = TransitionPhase.Ready;
+                activeTransactionId = 0;
+                string commitFail = "Commit failed during seat switch";
+                OnTransitionFailed?.Invoke(txId, commitFail, ControlMode.Mounted);
+                return ControlTransitionResult.Failed(txId, commitFail, ControlMode.Mounted);
+            }
+
+            if (currentSeat != null) mountable.VacateSeat(currentSeat, currentContext.Body);
+            mountable.OccupySeat(targetSeat, currentContext.Body);
+
+            if (!targetSeat.grantsControlLease && activeLeaseTarget == mountTarget && activeLeaseId != 0)
+            {
+                mountTarget.NeutralizeInputs();
+                mountTarget.SetInputActive(false);
+                mountTarget.ReleaseControlLease(activeLeaseId);
+                activeLeaseId = 0;
+                activeLeaseTarget = null;
+            }
+            else if (needsNewLease)
+            {
+                activeLeaseId = txId;
+                activeLeaseTarget = mountTarget;
+                SetTargetInputActive(mountTarget, true);
+            }
+
+            prospectiveTarget = null;
+            prospectiveSeat = null;
+            prospectiveMountable = null;
+
+            ControlContext previous = currentContext;
+            contextVersion++;
+            currentContext = new ControlContext(
+                contextVersion,
+                sessionGeneration,
+                previous.PlayerId,
+                previous.Body,
+                mountTarget,
+                ControlMode.Mounted,
+                targetSeat,
+                previous.ActiveCamera,
+                mountTarget.Transform,
+                previous.ProtectedAnchors
+            );
+
+            phase = TransitionPhase.Ready;
+            activeTransactionId = 0;
+
+            OnContextCommitted?.Invoke(previous, currentContext, "SeatSwitched");
+            return ControlTransitionResult.Succeeded(txId, ControlMode.Mounted);
+        }
+
         public ControlTransitionResult RequestTransitionToOnFoot(
             IControlTarget bodyTarget,
             Vector3 exitWorldPosition,
@@ -440,7 +548,8 @@ namespace AkaitoAi.UniversalMountSystem
             phase = TransitionPhase.Reserved;
 
             phase = TransitionPhase.Quiesced;
-            if (currentMount != null && currentMount.IsValid)
+            bool hadMountLease = currentMount != null && currentMount.IsValid && activeLeaseTarget == currentMount && activeLeaseId != 0;
+            if (hadMountLease)
             {
                 currentMount.NeutralizeInputs();
                 currentMount.SetInputActive(false);
@@ -448,15 +557,8 @@ namespace AkaitoAi.UniversalMountSystem
 
             phase = TransitionPhase.Preparing;
             bool prepared;
-            try
-            {
-                prepared = prepareCallback == null || prepareCallback();
-            }
-            catch (Exception ex)
-            {
-                Debug.LogError($"[ControlSessionCoordinator] Prepare callback exception: {ex}");
-                prepared = false;
-            }
+            try { prepared = prepareCallback == null || prepareCallback(); }
+            catch (Exception ex) { Debug.LogError($"[ControlSessionCoordinator] Prepare callback exception: {ex}"); prepared = false; }
 
             if (sessionGeneration != currentSessionGeneration)
             {
@@ -467,21 +569,10 @@ namespace AkaitoAi.UniversalMountSystem
             if (!prepared)
             {
                 phase = TransitionPhase.RollingBack;
-                try
-                {
-                    rollbackCallback?.Invoke();
-                }
-                catch (Exception ex)
-                {
-                    Debug.LogError($"[ControlSessionCoordinator] Rollback callback exception: {ex}");
-                }
+                try { rollbackCallback?.Invoke(); } catch (Exception ex) { Debug.LogError(ex); }
 
                 CleanupProspectiveReservations(txId);
-
-                if (currentMount != null && currentMount.IsValid)
-                {
-                    SetTargetInputActive(currentMount, true);
-                }
+                if (hadMountLease) SetTargetInputActive(currentMount, true);
 
                 phase = TransitionPhase.Ready;
                 activeTransactionId = 0;
@@ -506,21 +597,10 @@ namespace AkaitoAi.UniversalMountSystem
             if (!commitSucceeded)
             {
                 phase = TransitionPhase.RollingBack;
-                try
-                {
-                    rollbackCallback?.Invoke();
-                }
-                catch (Exception ex)
-                {
-                    Debug.LogError($"[ControlSessionCoordinator] Rollback callback exception after commit failure: {ex}");
-                }
+                try { rollbackCallback?.Invoke(); } catch (Exception ex) { Debug.LogError(ex); }
 
                 CleanupProspectiveReservations(txId);
-
-                if (currentMount != null && currentMount.IsValid)
-                {
-                    SetTargetInputActive(currentMount, true);
-                }
+                if (hadMountLease) SetTargetInputActive(currentMount, true);
 
                 phase = TransitionPhase.Ready;
                 activeTransactionId = 0;
@@ -534,7 +614,7 @@ namespace AkaitoAi.UniversalMountSystem
                 mountable.VacateSeat(currentSeat, currentContext.Body);
             }
 
-            if (currentMount != null && currentMount.IsValid && activeLeaseId != 0)
+            if (hadMountLease)
             {
                 currentMount.ReleaseControlLease(activeLeaseId);
             }
@@ -550,12 +630,9 @@ namespace AkaitoAi.UniversalMountSystem
             ControlContext previous = currentContext;
             contextVersion++;
             var protectedAnchors = new List<Transform>();
-            if (currentContext.Body != null)
-            {
-                protectedAnchors.Add(currentContext.Body.transform);
-            }
+            if (currentContext.Body != null) protectedAnchors.Add(currentContext.Body.transform);
 
-            Transform onFootAnchor = previous.Body != null ? previous.Body.transform : (bodyTarget != null ? bodyTarget.Transform : null);
+            Transform onFootAnchor = previous.Body != null ? previous.Body.transform : bodyTarget.Transform;
 
             currentContext = new ControlContext(
                 contextVersion,
@@ -577,20 +654,6 @@ namespace AkaitoAi.UniversalMountSystem
             return ControlTransitionResult.Succeeded(txId, ControlMode.OnFoot);
         }
 
-        public ControlTransitionResult RequestTransitionToRemote(
-            IControlTarget remoteTarget,
-            Func<bool> prepareCallback,
-            Action commitCallback,
-            Action rollbackCallback)
-        {
-            const string reason = "Remote mode is reserved for custom multi-anchor extensions";
-            OnTransitionFailed?.Invoke(0, reason, ControlMode.Remote);
-            return ControlTransitionResult.Failed(0, reason, ControlMode.Remote);
-        }
-
-        /// <summary>
-        /// Cancels any in-flight transition and releases prospective reservations.
-        /// </summary>
         public void CancelActiveTransition(string reason)
         {
             if (phase == TransitionPhase.Ready) return;
@@ -615,36 +678,25 @@ namespace AkaitoAi.UniversalMountSystem
         {
             if (prospectiveSeat != null && prospectiveMountable != null)
             {
-                try
-                {
-                    prospectiveMountable.ReleaseSeatReservation(prospectiveSeat, txId);
-                }
-                catch (Exception ex)
-                {
-                    Debug.LogWarning($"[ControlSessionCoordinator] Exception releasing prospective seat reservation: {ex}");
-                }
+                try { prospectiveMountable.ReleaseSeatReservation(prospectiveSeat, txId); }
+                catch (Exception ex) { Debug.LogWarning($"[ControlSessionCoordinator] Exception releasing seat reservation: {ex}"); }
                 prospectiveSeat = null;
                 prospectiveMountable = null;
             }
 
             if (prospectiveTarget != null)
             {
-                try
-                {
-                    prospectiveTarget.ReleaseControlLease(txId);
-                }
-                catch (Exception ex)
-                {
-                    Debug.LogWarning($"[ControlSessionCoordinator] Exception releasing prospective lease: {ex}");
-                }
+                try { prospectiveTarget.ReleaseControlLease(txId); }
+                catch (Exception ex) { Debug.LogWarning($"[ControlSessionCoordinator] Exception releasing lease: {ex}"); }
                 prospectiveTarget = null;
             }
         }
 
         /// <summary>
-        /// Safe recovery to on-foot mode following an unexpected mount invalidation or destruction.
+        /// Safe recovery to on-foot mode following an unexpected mount invalidation, destruction, or character death.
+        /// Vacates any occupied seat and releases any active mount lease.
         /// </summary>
-        public void RecoverToOnFoot(Vector3 safePosition, Quaternion safeRotation, IControlTarget bodyTarget, Camera characterCamera)
+        public void RecoverToOnFoot(Vector3 safePosition, Quaternion safeRotation, IControlTarget bodyTarget, Camera characterCamera, bool repositionBody = true)
         {
             phase = TransitionPhase.Recovering;
             sessionGeneration++;
@@ -652,25 +704,34 @@ namespace AkaitoAi.UniversalMountSystem
             activeTransactionId = 0;
             CleanupProspectiveReservations(0);
 
+            // Vacate occupied seat if mount still exists
+            if (currentContext.Mode == ControlMode.Mounted && currentContext.ControlledTarget != null && currentContext.OccupiedSeat != null)
+            {
+                if (!(currentContext.ControlledTarget is UnityEngine.Object uo && uo == null))
+                {
+                    IMountable mountable = currentContext.ControlledTarget.GetCapability<IMountable>();
+                    mountable?.VacateSeat(currentContext.OccupiedSeat, currentContext.Body);
+                }
+            }
+
             if (activeLeaseTarget != null && activeLeaseTarget != bodyTarget && activeLeaseTarget.IsValid && activeLeaseId != 0)
             {
                 activeLeaseTarget.NeutralizeInputs();
                 activeLeaseTarget.ReleaseControlLease(activeLeaseId);
             }
 
-            if (currentContext.Body != null)
+            if (repositionBody && currentContext.Body != null)
             {
-                currentContext.Body.transform.position = safePosition;
-                currentContext.Body.transform.rotation = safeRotation;
+                currentContext.Body.transform.SetPositionAndRotation(safePosition, safeRotation);
             }
 
             long newLeaseId = ++transactionCounter;
-            if (bodyTarget != null)
+            if (bodyTarget != null && bodyTarget.IsValid)
             {
                 bodyTarget.AcquireControlLease(newLeaseId);
                 SetTargetInputActive(bodyTarget, true);
             }
-            activeLeaseId = newLeaseId;
+            activeLeaseId = bodyTarget != null ? newLeaseId : 0;
             activeLeaseTarget = bodyTarget;
 
             var protectedAnchors = currentContext.Body != null
@@ -695,9 +756,6 @@ namespace AkaitoAi.UniversalMountSystem
             OnContextCommitted?.Invoke(previous, currentContext, "RecoveredToOnFoot");
         }
 
-        /// <summary>
-        /// Explicit shutdown on scene unload or manager destruction. Releases all leases and neutralizes active inputs.
-        /// </summary>
         public void Shutdown()
         {
             if (activeTransactionId != 0)

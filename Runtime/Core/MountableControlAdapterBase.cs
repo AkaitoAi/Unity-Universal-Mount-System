@@ -6,14 +6,18 @@ namespace AkaitoAi.UniversalMountSystem
     /// <summary>
     /// Abstract base class for any mountable entity (car, motorcycle, horse, boat, aircraft, mech, turret, etc.).
     /// Provides multi-seat configuration, speed-gated mount/exit checks, body-surface proximity queries,
-    /// Rigidbody motion telemetry, and automatic registration in <see cref="MountableRegistry"/>.
+    /// Rigidbody motion telemetry, Scene-View gizmos, and automatic registration in <see cref="MountableRegistry"/>.
     /// </summary>
     public abstract class MountableControlAdapterBase : ControlTargetAdapterBase, IMountable, IMotionTelemetry
     {
         [Header("Mount & Seating Configuration")]
         [SerializeField] protected List<MountSeat> seats = new List<MountSeat>();
-        [SerializeField] protected float maxBoardingSpeedKmh = 10f;
-        [SerializeField] protected float maxExitSpeedKmh = 5f;
+        [Tooltip("Exit clearance policy. Use AllowAirborneOrWater for boats/aircraft, GroundedOnly for land mounts.")]
+        [SerializeField] protected ExitSafetyPolicy exitSafetyPolicy = ExitSafetyPolicy.GroundedOnly;
+        [Tooltip("Per-mount boarding speed limit in km/h. Leave at -1 to use MountSessionSettingsSO.maxBoardingSpeedKmh.")]
+        [SerializeField] protected float maxBoardingSpeedKmh = -1f;
+        [Tooltip("Per-mount exit speed limit in km/h. Leave at -1 to use MountSessionSettingsSO.maxExitSpeedKmh.")]
+        [SerializeField] protected float maxExitSpeedKmh = -1f;
         [SerializeField] protected string mountActionLabel = "Enter";
         [SerializeField] protected string exitActionLabel = "Exit";
         [Tooltip("Optional icon representing this mount type (car, bike, horse, boat, aircraft, etc.) in the interaction UI.")]
@@ -21,9 +25,12 @@ namespace AkaitoAi.UniversalMountSystem
 
         private Collider[] interactionColliders;
 
-        public Sprite MountIcon => mountIcon;
+        public override Sprite MountIcon => mountIcon;
         public override string MountActionLabel => string.IsNullOrEmpty(mountActionLabel) ? "Enter" : mountActionLabel;
         public override string ExitActionLabel => string.IsNullOrEmpty(exitActionLabel) ? "Exit" : exitActionLabel;
+        public ExitSafetyPolicy ExitPolicy => exitSafetyPolicy;
+        public float MaxBoardingSpeedKmh => maxBoardingSpeedKmh;
+        public float MaxExitSpeedKmh => maxExitSpeedKmh;
 
         public IReadOnlyList<MountSeat> Seats
         {
@@ -44,8 +51,8 @@ namespace AkaitoAi.UniversalMountSystem
         }
 
         public virtual Rigidbody Rigidbody => null;
-        public virtual Vector3 Velocity => Rigidbody != null ? Rigidbody.velocity : Vector3.zero;
-        public virtual float ForwardSpeed => Rigidbody != null ? Vector3.Dot(Rigidbody.velocity, transform.forward) : 0f;
+        public virtual Vector3 Velocity => UnityCompat.GetLinearVelocity(Rigidbody);
+        public virtual float ForwardSpeed => Vector3.Dot(Velocity, transform.forward);
         public virtual Transform MotionAnchor => transform;
 
         /// <summary>
@@ -66,19 +73,11 @@ namespace AkaitoAi.UniversalMountSystem
             base.Awake();
         }
 
-        /// <summary>
-        /// Refreshes the cached collider array used for body-surface proximity detection.
-        /// Call this if colliders are added or removed at runtime.
-        /// </summary>
         public void RefreshInteractionColliders()
         {
             interactionColliders = GetComponentsInChildren<Collider>(true);
         }
 
-        /// <summary>
-        /// Finds the nearest solid body surface and its gap from the character capsule.
-        /// The seat's entry anchor remains the boarding destination; proximity is measured around the whole body.
-        /// </summary>
         public bool TryGetInteractionPoint(
             CapsuleCollider characterCapsule,
             Vector3 fallbackOrigin,
@@ -133,7 +132,8 @@ namespace AkaitoAi.UniversalMountSystem
                     seatName = "PrimarySeat",
                     seatAnchor = transform,
                     entryApproachAnchor = transform,
-                    exitCandidateAnchors = new Transform[0]
+                    exitCandidateAnchors = new Transform[0],
+                    grantsControlLease = true
                 };
                 seats.Add(defaultSeat);
             }
@@ -150,9 +150,6 @@ namespace AkaitoAi.UniversalMountSystem
 
         #region IMountable Implementation
 
-        /// <summary>
-        /// Finds the closest unoccupied seat to <paramref name="characterPosition"/>, or null if all seats are occupied.
-        /// </summary>
         public virtual MountSeat FindAvailableSeat(Vector3 characterPosition)
         {
             if (seats.Count == 0) EnsureDefaultSeat();
@@ -188,11 +185,14 @@ namespace AkaitoAi.UniversalMountSystem
                 return false;
             }
 
-            float speed = CurrentSpeedKmh;
-            if (speed > maxBoardingSpeedKmh)
+            if (maxBoardingSpeedKmh >= 0f)
             {
-                reason = $"Mount moving too fast to enter ({speed:F1} km/h > {maxBoardingSpeedKmh} km/h)";
-                return false;
+                float speed = CurrentSpeedKmh;
+                if (speed > maxBoardingSpeedKmh)
+                {
+                    reason = $"Mount moving too fast to enter ({speed:F1} km/h > {maxBoardingSpeedKmh:F1} km/h)";
+                    return false;
+                }
             }
 
             Vector3 charPos = character != null ? character.transform.position : transform.position;
@@ -208,12 +208,15 @@ namespace AkaitoAi.UniversalMountSystem
 
         public virtual bool CanExit(GameObject character, out string reason)
         {
-            float speed = CurrentSpeedKmh;
-            var occupant = character != null ? character.GetComponent<CharacterControlAdapterBase>() : null;
-            if (speed > maxExitSpeedKmh && (occupant == null || !occupant.CanExitMoving))
+            if (maxExitSpeedKmh >= 0f)
             {
-                reason = $"Mount moving too fast to exit safely ({speed:F1} km/h > {maxExitSpeedKmh} km/h)";
-                return false;
+                float speed = CurrentSpeedKmh;
+                var occupant = character != null ? character.GetComponent<CharacterControlAdapterBase>() : null;
+                if (speed > maxExitSpeedKmh && (occupant == null || !occupant.CanExitMoving))
+                {
+                    reason = $"Mount moving too fast to exit safely ({speed:F1} km/h > {maxExitSpeedKmh:F1} km/h)";
+                    return false;
+                }
             }
 
             reason = string.Empty;
@@ -251,5 +254,48 @@ namespace AkaitoAi.UniversalMountSystem
         }
 
         #endregion
+
+#if UNITY_EDITOR
+        protected virtual void OnDrawGizmosSelected()
+        {
+            if (seats == null) return;
+
+            for (int i = 0; i < seats.Count; i++)
+            {
+                MountSeat seat = seats[i];
+                if (seat == null) continue;
+
+                if (seat.seatAnchor != null)
+                {
+                    Gizmos.color = Color.cyan;
+                    Gizmos.DrawWireSphere(seat.seatAnchor.position, 0.25f);
+                    Gizmos.DrawRay(seat.seatAnchor.position, seat.seatAnchor.forward * 0.7f);
+                }
+
+                if (seat.entryApproachAnchor != null)
+                {
+                    Gizmos.color = Color.green;
+                    Gizmos.DrawWireSphere(seat.entryApproachAnchor.position, 0.3f);
+                    Gizmos.DrawRay(seat.entryApproachAnchor.position, seat.entryApproachAnchor.forward * 0.6f);
+                    if (seat.seatAnchor != null)
+                    {
+                        Gizmos.DrawLine(seat.entryApproachAnchor.position, seat.seatAnchor.position);
+                    }
+                }
+
+                if (seat.exitCandidateAnchors != null)
+                {
+                    Gizmos.color = Color.yellow;
+                    for (int e = 0; e < seat.exitCandidateAnchors.Length; e++)
+                    {
+                        Transform exitT = seat.exitCandidateAnchors[e];
+                        if (exitT == null) continue;
+                        Gizmos.DrawWireCube(exitT.position + Vector3.up * 0.9f, new Vector3(0.6f, 1.8f, 0.6f));
+                        Gizmos.DrawRay(exitT.position + Vector3.up * 0.9f, exitT.forward * 0.7f);
+                    }
+                }
+            }
+        }
+#endif
     }
 }

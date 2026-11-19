@@ -40,7 +40,7 @@ namespace AkaitoAi.UniversalMountSystem.Adapters
             coastingUnoccupied = true;
             coastElapsed = 0f;
             mountRigidbody.isKinematic = false;
-            mountRigidbody.velocity = velocity;
+            UnityCompat.SetLinearVelocity(mountRigidbody, velocity);
             mountRigidbody.angularVelocity = angularVelocity;
         }
 
@@ -58,10 +58,10 @@ namespace AkaitoAi.UniversalMountSystem.Adapters
 
             coastElapsed += Time.fixedDeltaTime;
 
-            Vector3 currentVel = mountRigidbody.velocity;
+            Vector3 currentVel = UnityCompat.GetLinearVelocity(mountRigidbody);
             Vector3 planarVel = new Vector3(currentVel.x, 0f, currentVel.z);
             Vector3 nextPlanar = Vector3.MoveTowards(planarVel, Vector3.zero, decel * Time.fixedDeltaTime);
-            mountRigidbody.velocity = new Vector3(nextPlanar.x, currentVel.y, nextPlanar.z);
+            UnityCompat.SetLinearVelocity(mountRigidbody, new Vector3(nextPlanar.x, currentVel.y, nextPlanar.z));
             mountRigidbody.angularVelocity = Vector3.MoveTowards(
                 mountRigidbody.angularVelocity, Vector3.zero, decel * 0.5f * Time.fixedDeltaTime);
 
@@ -71,7 +71,7 @@ namespace AkaitoAi.UniversalMountSystem.Adapters
                 coastElapsed = 0f;
                 if (zeroVelocityOnRelease && !mountRigidbody.isKinematic)
                 {
-                    mountRigidbody.velocity = Vector3.zero;
+                    UnityCompat.SetLinearVelocity(mountRigidbody, Vector3.zero);
                     mountRigidbody.angularVelocity = Vector3.zero;
                 }
                 if (freezePhysicsWhenUncontrolled)
@@ -135,7 +135,7 @@ namespace AkaitoAi.UniversalMountSystem.Adapters
             {
                 if (zeroVelocityOnRelease && !mountRigidbody.isKinematic)
                 {
-                    mountRigidbody.velocity = Vector3.zero;
+                    UnityCompat.SetLinearVelocity(mountRigidbody, Vector3.zero);
                     mountRigidbody.angularVelocity = Vector3.zero;
                 }
                 if (freezePhysicsWhenUncontrolled)

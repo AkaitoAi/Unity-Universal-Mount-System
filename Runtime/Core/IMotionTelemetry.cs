@@ -9,6 +9,7 @@ namespace AkaitoAi.UniversalMountSystem
     {
         Vector3 Velocity { get; }
         float ForwardSpeed { get; }
+        float CurrentSpeedKmh { get; }
         Transform MotionAnchor { get; }
     }
 }

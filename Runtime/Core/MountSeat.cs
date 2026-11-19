@@ -13,6 +13,8 @@ namespace AkaitoAi.UniversalMountSystem
         public Transform[] exitCandidateAnchors;
         [Tooltip("Hide the rider visuals when seated. Disable for visible riders such as horses, motorcycles, or open turrets.")]
         public bool hideOccupantVisuals = true;
+        [Tooltip("If true, occupying this seat grants driving/riding control over the mount. Set false for passenger seats.")]
+        public bool grantsControlLease = true;
 
         [NonSerialized] private bool isOccupied;
         [NonSerialized] private GameObject occupant;

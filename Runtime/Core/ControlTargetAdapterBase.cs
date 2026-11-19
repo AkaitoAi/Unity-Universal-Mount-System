@@ -63,6 +63,7 @@ namespace AkaitoAi.UniversalMountSystem
         public IReadOnlyList<GameObject> ActiveUiRoots => activeUiRoots ?? Array.Empty<GameObject>();
         public virtual string MountActionLabel => "Enter";
         public virtual string ExitActionLabel => "Exit";
+        public virtual Sprite MountIcon => null;
 
         public ControlCameraRig CustomCameraRig => customCameraRig;
         public virtual ICameraRigAdapter CameraRig => (customCameraRig != null && customCameraRig.IsConfigured) ? customCameraRig : null;
@@ -138,9 +139,6 @@ namespace AkaitoAi.UniversalMountSystem
             return null;
         }
 
-        /// <summary>
-        /// Applies generic controller script, AudioSource, and UI root states when control is activated or deactivated.
-        /// </summary>
         protected virtual void ApplyGenericControlState(bool active)
         {
             if (controlBehaviours != null)

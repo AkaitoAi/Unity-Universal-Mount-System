@@ -23,8 +23,12 @@ namespace AkaitoAi.UniversalMountSystem.Samples
 
         private void Update()
         {
-            float h = Input.GetAxis("Horizontal");
-            float v = Input.GetAxis("Vertical");
+            float h = 0f;
+            float v = 0f;
+#if ENABLE_LEGACY_INPUT_MANAGER
+            h = Input.GetAxis("Horizontal");
+            v = Input.GetAxis("Vertical");
+#endif
 
             Vector3 forward = Vector3.forward;
             Vector3 right = Vector3.right;

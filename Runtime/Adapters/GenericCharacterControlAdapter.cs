@@ -8,11 +8,8 @@ namespace AkaitoAi.UniversalMountSystem.Adapters
     /// <summary>
     /// Ready-to-use, zero-dependency third-person character adapter.
     /// Works with ANY third-person controller (Unity Starter Assets, Invector, Opsive,
-    /// Kinematic Character Controller, or custom CharacterController/Rigidbody scripts).
-    ///
-    /// Assign your character's locomotion/input scripts in <c>controlBehaviours</c>.
-    /// When mounted, those scripts and physics/colliders are cleanly quiesced, the character is
-    /// parented to the seat anchor, and everything is restored on dismount.
+    /// Kinematic Character Controller, or custom CharacterController/Rigidbody scripts)
+    /// and both Legacy Input Manager and New Input System projects.
     /// </summary>
     [DisallowMultipleComponent]
     [DefaultExecutionOrder(-30)]
@@ -24,7 +21,9 @@ namespace AkaitoAi.UniversalMountSystem.Adapters
         [SerializeField] private CapsuleCollider characterCapsule;
         [SerializeField] private Animator characterAnimator;
 
-        [Header("Visuals & Seated Animation (Optional)")]
+        [Header("Seat Attachment & Visuals")]
+        [Tooltip("FollowAnchor (Recommended) syncs pose in LateUpdate without reparenting — prevents non-uniform mount scale distortion and ensures the player survives if the mount is destroyed mid-ride.")]
+        [SerializeField] private SeatAttachmentMode attachmentMode = SeatAttachmentMode.FollowAnchor;
         [Tooltip("Optional list of renderers to hide when a seat has hideOccupantVisuals = true. Auto-collected from children if empty.")]
         [SerializeField] private Renderer[] visualRenderers;
         [Tooltip("Optional Animator bool parameter set to true while mounted and false on dismount.")]
@@ -41,9 +40,11 @@ namespace AkaitoAi.UniversalMountSystem.Adapters
         [Min(30f)] [SerializeField] private float approachTurnSpeed = 540f;
         [Tooltip("Optional Animator float parameter driven with normalized approach speed (0..1) during automated approach.")]
         [SerializeField] private string approachSpeedFloatParameter = "";
-        [Tooltip("Horizontal/Vertical input axes checked to cancel automated approach when the player steers manually.")]
+#pragma warning disable 0414
+        [Tooltip("Legacy Input Manager axes checked to cancel automated approach when the player steers manually. For New Input System, set ManualMovementInputProvider in code.")]
         [SerializeField] private string horizontalAxisName = "Horizontal";
         [SerializeField] private string verticalAxisName = "Vertical";
+#pragma warning restore 0414
 
         [Header("Moving Exit Support")]
         [Tooltip("Allow dismounting while the mount is moving faster than maxExitSpeedKmh.")]
@@ -55,16 +56,29 @@ namespace AkaitoAi.UniversalMountSystem.Adapters
         [SerializeField] private UnityEvent<MovingExitParams> onMovingExitEvent;
 
         public override event Action OnCharacterDead;
+        public override event Action OnCharacterRevived;
+
+        /// <summary>
+        /// Optional delegate for reading manual movement input (e.g. from Unity's New Input System Move action)
+        /// to cancel automated approach when the player steers manually.
+        /// </summary>
+        public Func<Vector2> ManualMovementInputProvider { get; set; }
 
         private bool isAttached;
         private bool isDead;
         private bool isInputActive = true;
         private bool isApproaching;
+        private Transform followedSeatAnchor;
+
+        // Pending Rigidbody approach velocity applied in FixedUpdate
+        private bool hasPendingRbApproachVelocity;
+        private Vector3 pendingRbApproachDir;
 
         // Captured pre-mount state for rollback/restoration
         private Transform savedParent;
         private Vector3 savedPosition;
         private Quaternion savedRotation;
+        private Vector3 savedLocalScale = Vector3.one;
         private bool savedCharacterControllerEnabled;
         private bool savedRigidbodyKinematic;
         private bool savedRigidbodyDetectCollisions;
@@ -79,6 +93,23 @@ namespace AkaitoAi.UniversalMountSystem.Adapters
         public override CapsuleCollider CapsuleCollider => characterCapsule;
         public override Rigidbody Rigidbody => characterRigidbody;
 
+        public override float FootPivotOffset
+        {
+            get
+            {
+                float scaleY = Mathf.Abs(transform.lossyScale.y);
+                if (characterController != null)
+                {
+                    return Mathf.Max(0f, (characterController.height * 0.5f - characterController.center.y) * scaleY);
+                }
+                if (characterCapsule != null)
+                {
+                    return Mathf.Max(0f, (characterCapsule.height * 0.5f - characterCapsule.center.y) * scaleY);
+                }
+                return 0f;
+            }
+        }
+
         public override bool IsGrounded
         {
             get
@@ -87,7 +118,8 @@ namespace AkaitoAi.UniversalMountSystem.Adapters
                 {
                     return characterController.isGrounded;
                 }
-                return Physics.Raycast(transform.position + Vector3.up * 0.25f, Vector3.down, 0.55f, ~0, QueryTriggerInteraction.Ignore);
+                Vector3 footOrigin = transform.position - Vector3.up * FootPivotOffset + Vector3.up * 0.25f;
+                return Physics.Raycast(footOrigin, Vector3.down, 0.55f, ~0, QueryTriggerInteraction.Ignore);
             }
         }
 
@@ -96,7 +128,7 @@ namespace AkaitoAi.UniversalMountSystem.Adapters
             get
             {
                 if (characterController != null && characterController.enabled) return characterController.velocity;
-                if (characterRigidbody != null) return characterRigidbody.velocity;
+                if (characterRigidbody != null) return UnityCompat.GetLinearVelocity(characterRigidbody);
                 return Vector3.zero;
             }
         }
@@ -111,7 +143,28 @@ namespace AkaitoAi.UniversalMountSystem.Adapters
         protected override void Awake()
         {
             AutoDetectComponents();
+            savedLocalScale = transform.localScale;
             base.Awake();
+        }
+
+        private void LateUpdate()
+        {
+            if (isAttached && attachmentMode == SeatAttachmentMode.FollowAnchor && followedSeatAnchor != null)
+            {
+                transform.SetPositionAndRotation(followedSeatAnchor.position, followedSeatAnchor.rotation);
+            }
+        }
+
+        private void FixedUpdate()
+        {
+            if (isApproaching && hasPendingRbApproachVelocity && characterRigidbody != null && !characterRigidbody.isKinematic)
+            {
+                Vector3 vel = UnityCompat.GetLinearVelocity(characterRigidbody);
+                UnityCompat.SetLinearVelocity(characterRigidbody, new Vector3(
+                    pendingRbApproachDir.x * approachMoveSpeed,
+                    vel.y,
+                    pendingRbApproachDir.z * approachMoveSpeed));
+            }
         }
 
         private void AutoDetectComponents()
@@ -122,9 +175,6 @@ namespace AkaitoAi.UniversalMountSystem.Adapters
             if (characterAnimator == null) characterAnimator = GetComponentInChildren<Animator>();
         }
 
-        /// <summary>
-        /// Call from your game's health/damage system when the player character dies.
-        /// </summary>
         public void NotifyCharacterDead()
         {
             if (isDead) return;
@@ -132,12 +182,11 @@ namespace AkaitoAi.UniversalMountSystem.Adapters
             OnCharacterDead?.Invoke();
         }
 
-        /// <summary>
-        /// Call from your game's respawn/revive system when the player character is revived.
-        /// </summary>
         public void NotifyCharacterRevived()
         {
+            if (!isDead) return;
             isDead = false;
+            OnCharacterRevived?.Invoke();
         }
 
         public override void NeutralizeInputs()
@@ -147,7 +196,7 @@ namespace AkaitoAi.UniversalMountSystem.Adapters
 
             if (characterRigidbody != null && !characterRigidbody.isKinematic)
             {
-                characterRigidbody.velocity = Vector3.zero;
+                UnityCompat.SetLinearVelocity(characterRigidbody, Vector3.zero);
                 characterRigidbody.angularVelocity = Vector3.zero;
             }
         }
@@ -163,6 +212,7 @@ namespace AkaitoAi.UniversalMountSystem.Adapters
             savedParent = transform.parent;
             savedPosition = transform.position;
             savedRotation = transform.rotation;
+            savedLocalScale = transform.localScale;
             savedCharacterControllerEnabled = characterController != null && characterController.enabled;
 
             if (characterRigidbody != null)
@@ -174,12 +224,19 @@ namespace AkaitoAi.UniversalMountSystem.Adapters
 
         public override void Attach(Transform mountAnchor, MountSeat seat)
         {
-            if (isAttached) return;
+            Transform targetAnchor = (seat != null && seat.seatAnchor != null) ? seat.seatAnchor : mountAnchor;
+
+            // Support in-place seat switching while already attached
+            if (isAttached)
+            {
+                MoveToSeatAnchor(targetAnchor, seat);
+                onMountedEvent?.Invoke(seat);
+                return;
+            }
 
             EndApproachDrive();
             NeutralizeInputs();
 
-            // Disable physics & colliders so the seated character never collides with the mount
             if (characterController != null)
             {
                 savedCharacterControllerEnabled = characterController.enabled;
@@ -192,7 +249,7 @@ namespace AkaitoAi.UniversalMountSystem.Adapters
                 savedRigidbodyDetectCollisions = characterRigidbody.detectCollisions;
                 if (!characterRigidbody.isKinematic)
                 {
-                    characterRigidbody.velocity = Vector3.zero;
+                    UnityCompat.SetLinearVelocity(characterRigidbody, Vector3.zero);
                     characterRigidbody.angularVelocity = Vector3.zero;
                 }
                 characterRigidbody.isKinematic = true;
@@ -210,8 +267,21 @@ namespace AkaitoAi.UniversalMountSystem.Adapters
                 }
             }
 
-            // Hide visuals only if the seat requests it (e.g. closed car cabin vs. open horse/bike)
+            MoveToSeatAnchor(targetAnchor, seat);
+
+            isAttached = true;
+            onMountedEvent?.Invoke(seat);
+        }
+
+        private void MoveToSeatAnchor(Transform targetAnchor, MountSeat seat)
+        {
+            // Restore previously hidden renderers first (in case switching between hidden/visible seats)
+            for (int i = 0; i < hiddenRenderers.Count; i++)
+            {
+                if (hiddenRenderers[i] != null) hiddenRenderers[i].enabled = true;
+            }
             hiddenRenderers.Clear();
+
             bool hideVisuals = seat != null && seat.hideOccupantVisuals;
             if (hideVisuals)
             {
@@ -228,25 +298,37 @@ namespace AkaitoAi.UniversalMountSystem.Adapters
                 }
             }
 
-            Transform targetParent = (seat != null && seat.seatAnchor != null) ? seat.seatAnchor : mountAnchor;
-            if (targetParent != null)
+            if (targetAnchor != null)
             {
-                transform.SetParent(targetParent, false);
-                transform.localPosition = Vector3.zero;
-                transform.localRotation = Quaternion.identity;
+                if (attachmentMode == SeatAttachmentMode.ParentToAnchor)
+                {
+                    followedSeatAnchor = null;
+                    transform.SetParent(targetAnchor, false);
+                    transform.localPosition = Vector3.zero;
+                    transform.localRotation = Quaternion.identity;
+                }
+                else
+                {
+                    followedSeatAnchor = targetAnchor;
+                    transform.SetPositionAndRotation(targetAnchor.position, targetAnchor.rotation);
+                }
             }
 
             UpdateAnimatorMountState(true, seat != null ? seat.seatIndex : 0);
-
-            isAttached = true;
-            onMountedEvent?.Invoke(seat);
         }
 
         public override void Detach(Vector3 exitWorldPosition, Quaternion exitWorldRotation)
         {
             if (!isAttached) return;
 
-            transform.SetParent(savedParent, true);
+            followedSeatAnchor = null;
+
+            if (attachmentMode == SeatAttachmentMode.ParentToAnchor)
+            {
+                transform.SetParent(savedParent, true);
+                transform.localScale = savedLocalScale;
+            }
+
             transform.SetPositionAndRotation(exitWorldPosition, exitWorldRotation);
 
             for (int i = 0; i < hiddenRenderers.Count; i++)
@@ -267,7 +349,7 @@ namespace AkaitoAi.UniversalMountSystem.Adapters
                 characterRigidbody.detectCollisions = savedRigidbodyDetectCollisions;
                 if (!characterRigidbody.isKinematic)
                 {
-                    characterRigidbody.velocity = Vector3.zero;
+                    UnityCompat.SetLinearVelocity(characterRigidbody, Vector3.zero);
                     characterRigidbody.angularVelocity = Vector3.zero;
                 }
             }
@@ -291,7 +373,9 @@ namespace AkaitoAi.UniversalMountSystem.Adapters
             }
             else
             {
+                followedSeatAnchor = null;
                 transform.SetParent(savedParent, true);
+                transform.localScale = savedLocalScale;
                 transform.SetPositionAndRotation(savedPosition, savedRotation);
             }
         }
@@ -303,7 +387,7 @@ namespace AkaitoAi.UniversalMountSystem.Adapters
                 Vector3 impulseVelocity = exitParams.baseVelocity
                     + exitParams.outwardDirection * exitParams.outwardImpulse
                     + Vector3.up * exitParams.upwardImpulse;
-                characterRigidbody.velocity = impulseVelocity;
+                UnityCompat.SetLinearVelocity(characterRigidbody, impulseVelocity);
             }
 
             onMovingExitEvent?.Invoke(exitParams);
@@ -333,6 +417,7 @@ namespace AkaitoAi.UniversalMountSystem.Adapters
             if (!CanStartApproach) return false;
 
             isApproaching = true;
+            hasPendingRbApproachVelocity = false;
             savedBehaviourStates.Clear();
             if (controlBehaviours != null)
             {
@@ -357,27 +442,33 @@ namespace AkaitoAi.UniversalMountSystem.Adapters
             Vector3 toTarget = nextWaypointWorld - transform.position;
             toTarget.y = 0f;
             float dist = toTarget.magnitude;
-            if (dist < 0.02f) return;
+            if (dist < 0.02f)
+            {
+                hasPendingRbApproachVelocity = false;
+                return;
+            }
 
             Vector3 dir = toTarget / dist;
             Quaternion targetRot = Quaternion.LookRotation(dir, Vector3.up);
             transform.rotation = Quaternion.RotateTowards(transform.rotation, targetRot, approachTurnSpeed * deltaTime);
 
-            float step = Mathf.Min(dist, approachMoveSpeed * deltaTime);
-
             if (characterController != null && characterController.enabled)
             {
+                hasPendingRbApproachVelocity = false;
+                float step = Mathf.Min(dist, approachMoveSpeed * deltaTime);
                 Vector3 move = dir * step;
                 move.y = Physics.gravity.y * deltaTime;
                 characterController.Move(move);
             }
             else if (characterRigidbody != null && !characterRigidbody.isKinematic)
             {
-                Vector3 vel = characterRigidbody.velocity;
-                characterRigidbody.velocity = new Vector3(dir.x * approachMoveSpeed, vel.y, dir.z * approachMoveSpeed);
+                pendingRbApproachDir = dir;
+                hasPendingRbApproachVelocity = true;
             }
             else
             {
+                hasPendingRbApproachVelocity = false;
+                float step = Mathf.Min(dist, approachMoveSpeed * deltaTime);
                 transform.position += dir * step;
             }
 
@@ -392,6 +483,7 @@ namespace AkaitoAi.UniversalMountSystem.Adapters
             if (!isApproaching) return;
 
             isApproaching = false;
+            hasPendingRbApproachVelocity = false;
 
             if (characterAnimator != null && !string.IsNullOrEmpty(approachSpeedFloatParameter))
             {
@@ -400,8 +492,8 @@ namespace AkaitoAi.UniversalMountSystem.Adapters
 
             if (characterRigidbody != null && !characterRigidbody.isKinematic)
             {
-                Vector3 vel = characterRigidbody.velocity;
-                characterRigidbody.velocity = new Vector3(0f, vel.y, 0f);
+                Vector3 vel = UnityCompat.GetLinearVelocity(characterRigidbody);
+                UnityCompat.SetLinearVelocity(characterRigidbody, new Vector3(0f, vel.y, 0f));
             }
 
             if (controlBehaviours != null)
@@ -420,9 +512,18 @@ namespace AkaitoAi.UniversalMountSystem.Adapters
 
         public Vector2 ReadManualMovementInput()
         {
+            if (ManualMovementInputProvider != null)
+            {
+                return ManualMovementInputProvider();
+            }
+
+#if ENABLE_LEGACY_INPUT_MANAGER
             float h = !string.IsNullOrEmpty(horizontalAxisName) ? Input.GetAxisRaw(horizontalAxisName) : 0f;
             float v = !string.IsNullOrEmpty(verticalAxisName) ? Input.GetAxisRaw(verticalAxisName) : 0f;
             return new Vector2(h, v);
+#else
+            return Vector2.zero;
+#endif
         }
 
         #endregion

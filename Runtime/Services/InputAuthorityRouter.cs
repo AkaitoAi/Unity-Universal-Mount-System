@@ -8,13 +8,13 @@ namespace AkaitoAi.UniversalMountSystem.Services
 {
     /// <summary>
     /// Router managing token-based input suspension (pause, menus, death, transitions, focus loss)
-    /// and unified interaction input (keyboard, gamepad, or UI button).
+    /// and unified interaction input (Legacy Input Manager keys, UI button, or New Input System callbacks).
     /// Token removal cannot clear other active suspension tokens.
     /// </summary>
     [DisallowMultipleComponent]
     public class InputAuthorityRouter : MonoBehaviour
     {
-        [Header("Interaction Key Bindings")]
+        [Header("Legacy Input Manager Bindings (Ignored When New Input System Only)")]
         [SerializeField] private KeyCode desktopInteractionKey = KeyCode.E;
         [SerializeField] private KeyCode secondaryInteractionKey = KeyCode.F;
         [SerializeField] private KeyCode gamepadInteractionKey = KeyCode.JoystickButton0;
@@ -44,8 +44,10 @@ namespace AkaitoAi.UniversalMountSystem.Services
         }
 
         private readonly HashSet<string> suspensionTokens = new HashSet<string>();
+#if ENABLE_LEGACY_INPUT_MANAGER
         private bool wasInteractionPressedLastFrame;
         private bool suppressNextInteraction;
+#endif
         private EventSystem activeEventSystem;
 
         public event Action OnInteractionTriggered;
@@ -53,6 +55,16 @@ namespace AkaitoAi.UniversalMountSystem.Services
 
         public bool IsSuspended => suspensionTokens.Count > 0;
         public IReadOnlyCollection<string> ActiveTokens => suspensionTokens;
+
+        /// <summary>
+        /// Returns true if any suspension token other than <paramref name="ignoredToken"/> is active.
+        /// </summary>
+        public bool IsSuspendedExcluding(string ignoredToken)
+        {
+            if (suspensionTokens.Count == 0) return false;
+            if (suspensionTokens.Count == 1 && suspensionTokens.Contains(ignoredToken)) return false;
+            return true;
+        }
 
         private void OnEnable()
         {
@@ -90,7 +102,7 @@ namespace AkaitoAi.UniversalMountSystem.Services
                 activeEventSystem = EventSystem.current;
             }
 
-            EventSystem[] eventSystems = FindObjectsOfType<EventSystem>();
+            EventSystem[] eventSystems = UnityCompat.FindAllObjects<EventSystem>(false);
             for (int i = 0; i < eventSystems.Length; i++)
             {
                 if (!eventSystems[i].isActiveAndEnabled) continue;
@@ -151,12 +163,14 @@ namespace AkaitoAi.UniversalMountSystem.Services
 
         public void FlushInteractionEdges()
         {
+#if ENABLE_LEGACY_INPUT_MANAGER
             suppressNextInteraction = true;
             wasInteractionPressedLastFrame = true;
+#endif
         }
 
         /// <summary>
-        /// Triggers the mount/dismount interaction from a UI button or custom Input System callback.
+        /// Triggers the mount/dismount interaction from a UI button or Unity New Input System action callback.
         /// </summary>
         public void TriggerInteractionFromUI()
         {
@@ -165,6 +179,12 @@ namespace AkaitoAi.UniversalMountSystem.Services
             OnInteractionTriggered?.Invoke();
         }
 
+        /// <summary>
+        /// Alias for <see cref="TriggerInteractionFromUI"/> for New Input System or custom input hooks.
+        /// </summary>
+        public void TriggerInteraction() => TriggerInteractionFromUI();
+
+#if ENABLE_LEGACY_INPUT_MANAGER
         private void Update()
         {
             bool isPressed =
@@ -186,5 +206,6 @@ namespace AkaitoAi.UniversalMountSystem.Services
 
             wasInteractionPressedLastFrame = isPressed;
         }
+#endif
     }
 }

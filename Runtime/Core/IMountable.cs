@@ -12,6 +12,11 @@ namespace AkaitoAi.UniversalMountSystem
     {
         IReadOnlyList<MountSeat> Seats { get; }
         MountSeat PrimarySeat { get; }
+        ExitSafetyPolicy ExitPolicy { get; }
+        /// <summary>Per-mount boarding speed limit in km/h. Negative values inherit MountSessionSettingsSO.maxBoardingSpeedKmh.</summary>
+        float MaxBoardingSpeedKmh { get; }
+        /// <summary>Per-mount exit speed limit in km/h. Negative values inherit MountSessionSettingsSO.maxExitSpeedKmh.</summary>
+        float MaxExitSpeedKmh { get; }
 
         MountSeat FindAvailableSeat(Vector3 characterPosition);
         bool CanMount(GameObject character, out string reason);

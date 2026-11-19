@@ -28,7 +28,7 @@ namespace AkaitoAi.UniversalMountSystem.UI
         [SerializeField] private Image mountIconImage;
 
         [Header("Contextual / Mobile UI Groups (Optional)")]
-        [Tooltip("Default UI root for on-foot controls (e.g. mobile joystick/buttons).")]
+        [Tooltip("Default UI root for on-foot controls (hidden via CanvasGroup so touch axes stay alive).")]
         [SerializeField] private GameObject defaultOnFootUiRoot;
         [Tooltip("Default UI root for mounted controls (used when a mount has no dedicated mobileControlsRoot).")]
         [SerializeField] private GameObject defaultMountedUiRoot;
@@ -39,7 +39,9 @@ namespace AkaitoAi.UniversalMountSystem.UI
         [SerializeField] private string cancelActionLabel = "Cancel";
 
         [Header("Detection Settings")]
-        [SerializeField] private LayerMask obstacleMask = ~0;
+        [Tooltip("If true, uses obstacleMaskOverride instead of MountSessionSettingsSO.obstacleLayerMask.")]
+        [SerializeField] private bool overrideObstacleMask = false;
+        [SerializeField] private LayerMask obstacleMaskOverride = ~0;
         [SerializeField] private float detectionInterval = 0.12f;
 
         public Button InteractionButton => interactionButton;
@@ -53,12 +55,10 @@ namespace AkaitoAi.UniversalMountSystem.UI
         private bool hasInitializedVisuals;
         private bool lastVisible;
         private string lastActionText = string.Empty;
-        private string lastFullPromptText = string.Empty;
 
         private bool isSubscribed;
         private GameObject activeCustomMobileRoot;
 
-        // Approach state (100% generic via ICharacterApproachDriver)
         private IControlTarget approachTarget;
         private MountSeat approachSeat;
         private ICharacterApproachDriver approachDriver;
@@ -87,7 +87,7 @@ namespace AkaitoAi.UniversalMountSystem.UI
             EnsureSubscribed();
 
             hasInitializedVisuals = false;
-            UpdateVisuals(false, string.Empty, string.Empty);
+            UpdateVisuals(false, string.Empty);
 
             if (MountSessionManager.TryGet(out var manager))
             {
@@ -121,7 +121,7 @@ namespace AkaitoAi.UniversalMountSystem.UI
             }
 
             isSubscribed = false;
-            UpdateVisuals(false, string.Empty, string.Empty);
+            UpdateVisuals(false, string.Empty);
         }
 
         private void EnsureSubscribed()
@@ -230,19 +230,19 @@ namespace AkaitoAi.UniversalMountSystem.UI
         {
             if (!MountSessionManager.TryGet(out var manager) || manager.IsTransitioning)
             {
-                UpdateVisuals(false, string.Empty, string.Empty);
+                UpdateVisuals(false, string.Empty);
                 return;
             }
 
             if (manager.InputRouter != null && manager.InputRouter.IsSuspended)
             {
-                UpdateVisuals(false, string.Empty, string.Empty);
+                UpdateVisuals(false, string.Empty);
                 return;
             }
 
             if (IsApproaching)
             {
-                UpdateVisuals(true, cancelActionLabel, FormatPrompt(cancelActionLabel), approachTarget);
+                UpdateVisuals(true, cancelActionLabel, approachTarget);
                 return;
             }
 
@@ -259,18 +259,27 @@ namespace AkaitoAi.UniversalMountSystem.UI
                         exitAction = uiProvider.ExitActionLabel;
                     }
                 }
-                UpdateVisuals(true, exitAction, FormatPrompt(exitAction), activeTarget);
+                UpdateVisuals(true, exitAction, activeTarget);
                 return;
             }
 
-            Transform playerT = manager.CharacterAdapter != null ? manager.CharacterAdapter.transform : null;
+            CharacterControlAdapterBase character = manager.CharacterAdapter;
+            Transform playerT = character != null ? character.transform : null;
             if (playerT == null)
             {
-                UpdateVisuals(false, string.Empty, string.Empty);
+                UpdateVisuals(false, string.Empty);
                 return;
             }
 
-            float range = Mathf.Max(0.5f, Mathf.Max(manager.Settings.approachSelectionRange, manager.Settings.interactionRange));
+            ICharacterApproachDriver driver = character.GetCapability<ICharacterApproachDriver>();
+            bool supportsApproach = driver != null && driver.CanStartApproach;
+
+            float range = supportsApproach
+                ? Mathf.Max(0.5f, Mathf.Max(manager.Settings.approachSelectionRange, manager.Settings.interactionRange))
+                : Mathf.Max(0.5f, manager.Settings.interactionRange);
+
+            LayerMask activeObstacleMask = overrideObstacleMask ? obstacleMaskOverride : manager.Settings.obstacleLayerMask;
+
             IReadOnlyList<IControlTarget> mountables = MountableRegistry.ActiveMountables;
             IControlTarget closestTarget = null;
             float closestDistance = range;
@@ -289,25 +298,24 @@ namespace AkaitoAi.UniversalMountSystem.UI
                 MountSeat bestSeat = mountable.FindAvailableSeat(playerT.position) ?? mountable.PrimarySeat;
                 Transform approachAnchor = (bestSeat != null && bestSeat.entryApproachAnchor != null)
                     ? bestSeat.entryApproachAnchor
-                    : targetT;
+                    : (bestSeat != null && bestSeat.seatAnchor != null ? bestSeat.seatAnchor : targetT);
 
                 Vector3 targetPos = approachAnchor.position;
                 float dist = Vector3.Distance(playerT.position, targetPos);
 
-                CapsuleCollider playerCapsule = manager.CharacterAdapter.CapsuleCollider;
-                MountableControlAdapterBase bodyTarget = target as MountableControlAdapterBase;
-                Vector3 surfacePos = Vector3.zero;
-                float surfaceDist = float.MaxValue;
-                bool usesBodySurface = bodyTarget != null && bodyTarget.TryGetInteractionPoint(
-                    playerCapsule,
-                    playerT.position + Vector3.up,
-                    out surfacePos,
-                    out surfaceDist);
+                CapsuleCollider playerCapsule = character.CapsuleCollider;
+                bool usesBodySurface = false;
 
-                if (usesBodySurface && surfaceDist < dist)
+                // Only use body-surface selection when auto-approach can walk around to the entry anchor
+                if (supportsApproach && target is MountableControlAdapterBase bodyTarget)
                 {
-                    targetPos = surfacePos;
-                    dist = surfaceDist;
+                    if (bodyTarget.TryGetInteractionPoint(playerCapsule, playerT.position + Vector3.up, out Vector3 surfacePos, out float surfaceDist) &&
+                        surfaceDist < dist)
+                    {
+                        targetPos = surfacePos;
+                        dist = surfaceDist;
+                        usesBodySurface = true;
+                    }
                 }
 
                 if (dist <= closestDistance)
@@ -322,7 +330,7 @@ namespace AkaitoAi.UniversalMountSystem.UI
                     bool clearLoS = true;
                     if (rayDist > 0.25f)
                     {
-                        int hitCount = Physics.RaycastNonAlloc(rayStart, rayDir.normalized, losHits, rayDist, obstacleMask, QueryTriggerInteraction.Ignore);
+                        int hitCount = Physics.RaycastNonAlloc(rayStart, rayDir.normalized, losHits, rayDist, activeObstacleMask, QueryTriggerInteraction.Ignore);
                         if (hitCount >= losHits.Length) clearLoS = false;
                         for (int h = 0; h < hitCount; h++)
                         {
@@ -348,17 +356,23 @@ namespace AkaitoAi.UniversalMountSystem.UI
             nearbyTarget = closestTarget;
             if (nearbyTarget != null)
             {
+                if (manager.Settings.allowProximityAutoEntry && !IsApproaching)
+                {
+                    BeginApproachOrEnter(manager, nearbyTarget);
+                    return;
+                }
+
                 string enterAction = "Enter";
                 IMobileControlUIProvider uiProvider = nearbyTarget.GetCapability<IMobileControlUIProvider>() ?? (nearbyTarget as IMobileControlUIProvider);
                 if (uiProvider != null && !string.IsNullOrEmpty(uiProvider.MountActionLabel))
                 {
                     enterAction = uiProvider.MountActionLabel;
                 }
-                UpdateVisuals(true, enterAction, FormatPrompt(enterAction), nearbyTarget);
+                UpdateVisuals(true, enterAction, nearbyTarget);
             }
             else
             {
-                UpdateVisuals(false, string.Empty, string.Empty);
+                UpdateVisuals(false, string.Empty);
             }
         }
 
@@ -369,17 +383,20 @@ namespace AkaitoAi.UniversalMountSystem.UI
                 : string.Format(promptFormat, keyDisplayLabel, actionLabel);
         }
 
-        private void UpdateVisuals(bool visible, string actionText, string promptText, IControlTarget target = null)
+        private void UpdateVisuals(bool visible, string actionText, IControlTarget target = null)
         {
             if (mountIconImage != null)
             {
-                var mount = target as MountableControlAdapterBase;
-                Sprite icon = mount != null ? mount.MountIcon : null;
+                IMobileControlUIProvider uiProvider = target != null
+                    ? (target.GetCapability<IMobileControlUIProvider>() ?? target as IMobileControlUIProvider)
+                    : null;
+                Sprite icon = uiProvider != null ? uiProvider.MountIcon : null;
                 if (mountIconImage.sprite != icon) mountIconImage.sprite = icon;
                 mountIconImage.enabled = visible && icon != null;
             }
 
-            if (hasInitializedVisuals && visible == lastVisible && actionText == lastActionText && promptText == lastFullPromptText)
+            // Guard BEFORE calling string.Format to guarantee zero per-tick GC allocations
+            if (hasInitializedVisuals && visible == lastVisible && actionText == lastActionText)
             {
                 return;
             }
@@ -387,13 +404,12 @@ namespace AkaitoAi.UniversalMountSystem.UI
             hasInitializedVisuals = true;
             lastVisible = visible;
             lastActionText = actionText;
-            lastFullPromptText = promptText;
 
             if (promptRoot != null) promptRoot.SetActive(visible);
 
             if (visible)
             {
-                SetTextOnComponent(promptTextComponent, promptText);
+                SetTextOnComponent(promptTextComponent, FormatPrompt(actionText));
                 SetTextOnComponent(buttonLabelComponent, actionText);
             }
 
@@ -487,7 +503,6 @@ namespace AkaitoAi.UniversalMountSystem.UI
 
             float straightDistance = Vector3.Distance(character.transform.position, entryPosition);
 
-            // If already close enough to the entry anchor, or if the character has no approach driver, enter directly
             ICharacterApproachDriver driver = character.GetCapability<ICharacterApproachDriver>();
             if (straightDistance <= stoppingDistance || driver == null || !driver.CanStartApproach)
             {

@@ -6,17 +6,18 @@ using UnityEngine;
 namespace AkaitoAi.UniversalMountSystem
 {
     /// <summary>
-    /// Contract for adapting camera rigs (Cinemachine, third-person cameras, vehicle cameras, or custom scripts)
+    /// Contract for adapting camera rigs (Cinemachine 2/3, third-person cameras, vehicle cameras, or custom scripts)
     /// to a unified camera authority.
     /// </summary>
     public interface ICameraRigAdapter
     {
         string RigName { get; }
+        bool IsConfigured { get; }
         Camera OutputCamera { get; }
         AudioListener AudioListener { get; }
         void PrepareRig(Transform target);
         void ActivateRig();
-        void DeactivateRig();
+        void DeactivateRig(bool deactivateOutputCamera = true);
     }
 
     /// <summary>
@@ -36,7 +37,7 @@ namespace AkaitoAi.UniversalMountSystem
     }
 
     /// <summary>
-    /// Capability interface for control targets that supply dedicated mobile/contextual UI roots and action labels.
+    /// Capability interface for control targets that supply dedicated mobile/contextual UI roots, icons, and action labels.
     /// </summary>
     public interface IMobileControlUIProvider : IControlCapability
     {
@@ -44,11 +45,12 @@ namespace AkaitoAi.UniversalMountSystem
         IReadOnlyList<GameObject> ActiveUiRoots { get; }
         string MountActionLabel { get; }
         string ExitActionLabel { get; }
+        Sprite MountIcon { get; }
     }
 
     /// <summary>
     /// Serializable, vendor-agnostic camera rig definition wrapping a generic Camera, AudioListener,
-    /// camera controller script (Behaviour), and optional AudioSources.
+    /// camera controller script (Behaviour — including Cinemachine Virtual/Camera), and optional AudioSources.
     /// </summary>
     [Serializable]
     public class ControlCameraRig : ICameraRigAdapter
@@ -58,7 +60,7 @@ namespace AkaitoAi.UniversalMountSystem
         [SerializeField] private GameObject rigRoot;
         [SerializeField] private Camera outputCamera;
         [SerializeField] private AudioListener audioListener;
-        [Tooltip("Generic camera controller script (e.g. Cinemachine, third-person camera, vehicle camera, or custom follow script).")]
+        [Tooltip("Generic camera controller script (e.g. CinemachineVirtualCamera, CinemachineCamera, third-person camera, or custom follow script).")]
         [SerializeField] private Behaviour cameraScript;
         [Tooltip("Optional extra behaviours on the camera rig to toggle with the rig.")]
         [SerializeField] private Behaviour[] extraBehaviours;
@@ -70,6 +72,8 @@ namespace AkaitoAi.UniversalMountSystem
         private Action customDeactivate;
 
         private static readonly Dictionary<Type, MemberInfo> CachedTargetMembers = new Dictionary<Type, MemberInfo>();
+        private static readonly Dictionary<Type, PropertyInfo> CachedLookAtProperties = new Dictionary<Type, PropertyInfo>();
+        private static readonly Dictionary<Type, PropertyInfo> CachedCm3TargetProperties = new Dictionary<Type, PropertyInfo>();
 
         public string RigName
         {
@@ -261,7 +265,7 @@ namespace AkaitoAi.UniversalMountSystem
             customActivate?.Invoke();
         }
 
-        public void DeactivateRig()
+        public void DeactivateRig(bool deactivateOutputCamera = true)
         {
             customDeactivate?.Invoke();
 
@@ -286,23 +290,27 @@ namespace AkaitoAi.UniversalMountSystem
                     }
                 }
             }
-            if (audioListener != null)
+            if (deactivateOutputCamera)
             {
-                audioListener.enabled = false;
-            }
-            if (outputCamera != null)
-            {
-                if (outputCamera.CompareTag("MainCamera"))
+                if (audioListener != null)
                 {
-                    outputCamera.tag = "Untagged";
+                    audioListener.enabled = false;
                 }
-                outputCamera.enabled = false;
+                if (outputCamera != null)
+                {
+                    if (outputCamera.CompareTag("MainCamera"))
+                    {
+                        outputCamera.tag = "Untagged";
+                    }
+                    outputCamera.enabled = false;
+                }
             }
         }
 
         /// <summary>
         /// Generic helper to bind a target Transform to any camera script using <see cref="ICameraTargetable"/>
-        /// or cached member reflection (supports Cinemachine Follow, SetMainTarget, SetTarget, target, etc.).
+        /// or cached reflection (supports Cinemachine 2 Follow/LookAt, Cinemachine 3 Target.TrackingTarget,
+        /// SetCameraTarget, SetMainTarget, SetTarget, target, followTarget).
         /// </summary>
         public static bool BindTargetToCameraScript(Behaviour script, Transform target)
         {
@@ -315,9 +323,10 @@ namespace AkaitoAi.UniversalMountSystem
             }
 
             Type type = script.GetType();
+            const BindingFlags flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+
             if (!CachedTargetMembers.TryGetValue(type, out MemberInfo member))
             {
-                const BindingFlags flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
                 member = (MemberInfo)type.GetMethod("SetCameraTarget", flags, null, new[] { typeof(Transform) }, null)
                       ?? (MemberInfo)type.GetMethod("SetMainTarget", flags, null, new[] { typeof(Transform) }, null)
                       ?? (MemberInfo)type.GetMethod("SetTarget", flags, null, new[] { typeof(Transform) }, null)
@@ -330,23 +339,57 @@ namespace AkaitoAi.UniversalMountSystem
                 CachedTargetMembers[type] = member;
             }
 
+            bool bound = false;
+
             if (member is MethodInfo method)
             {
                 method.Invoke(script, new object[] { target });
-                return true;
+                bound = true;
             }
-            if (member is PropertyInfo prop && prop.CanWrite && typeof(Transform).IsAssignableFrom(prop.PropertyType))
+            else if (member is PropertyInfo prop && prop.CanWrite)
             {
-                prop.SetValue(script, target);
-                return true;
+                if (typeof(Transform).IsAssignableFrom(prop.PropertyType))
+                {
+                    prop.SetValue(script, target);
+                    bound = true;
+
+                    // Also update Cinemachine 2 LookAt if present
+                    if (prop.Name == "Follow")
+                    {
+                        if (!CachedLookAtProperties.TryGetValue(type, out PropertyInfo lookAtProp))
+                        {
+                            lookAtProp = type.GetProperty("LookAt", flags);
+                            CachedLookAtProperties[type] = lookAtProp;
+                        }
+                        if (lookAtProp != null && lookAtProp.CanWrite && typeof(Transform).IsAssignableFrom(lookAtProp.PropertyType))
+                        {
+                            lookAtProp.SetValue(script, target);
+                        }
+                    }
+                }
+                else if (prop.Name == "Target" && prop.PropertyType.IsValueType)
+                {
+                    // Unity 6 Cinemachine 3: CameraTarget struct with TrackingTarget field
+                    object targetStruct = prop.GetValue(script);
+                    if (targetStruct != null)
+                    {
+                        FieldInfo trackingField = prop.PropertyType.GetField("TrackingTarget", BindingFlags.Instance | BindingFlags.Public);
+                        if (trackingField != null && typeof(Transform).IsAssignableFrom(trackingField.FieldType))
+                        {
+                            trackingField.SetValue(targetStruct, target);
+                            prop.SetValue(script, targetStruct);
+                            bound = true;
+                        }
+                    }
+                }
             }
-            if (member is FieldInfo field && typeof(Transform).IsAssignableFrom(field.FieldType))
+            else if (member is FieldInfo field && typeof(Transform).IsAssignableFrom(field.FieldType))
             {
                 field.SetValue(script, target);
-                return true;
+                bound = true;
             }
 
-            return false;
+            return bound;
         }
     }
 
@@ -356,6 +399,7 @@ namespace AkaitoAi.UniversalMountSystem
     public class GenericCameraRigAdapter : ICameraRigAdapter
     {
         public string RigName { get; }
+        public bool IsConfigured => OutputCamera != null || onActivate != null;
         public Camera OutputCamera { get; }
         public AudioListener AudioListener { get; }
 
@@ -381,6 +425,6 @@ namespace AkaitoAi.UniversalMountSystem
 
         public void PrepareRig(Transform target) => onPrepare?.Invoke(target);
         public void ActivateRig() => onActivate?.Invoke();
-        public void DeactivateRig() => onDeactivate?.Invoke();
+        public void DeactivateRig(bool deactivateOutputCamera = true) => onDeactivate?.Invoke();
     }
 }

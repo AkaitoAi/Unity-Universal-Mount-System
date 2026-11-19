@@ -1,6 +1,6 @@
 {
   "name": "com.akaitoai.universal-mount-system",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "displayName": "Universal Mount System",
   "description": "Controller-agnostic, transactional mount and interaction system for Unity. Easily integrate with any third-person controller, any type of mount (vehicles, animals, turrets, boats, aircraft), and any number of mounts or seats.",
   "unity": "2021.3",

@@ -24,6 +24,7 @@ namespace AkaitoAi.UniversalMountSystem
     public abstract class CharacterControlAdapterBase : ControlTargetAdapterBase, ICharacterAttachment, IMotionTelemetry
     {
         public abstract event Action OnCharacterDead;
+        public virtual event Action OnCharacterRevived { add { } remove { } }
 
         public abstract bool IsAttached { get; }
         public abstract bool IsDead { get; }
@@ -33,13 +34,21 @@ namespace AkaitoAi.UniversalMountSystem
         public virtual bool CanExitMoving => false;
         public virtual bool CanBoard => !IsDead;
 
+        /// <summary>
+        /// Vertical offset from the character's feet to its Transform pivot.
+        /// 0 for feet-at-origin rigs (standard humanoid characters), or ~height/2 for center-pivoted capsules.
+        /// Applied automatically on dismount so characters never sink into the ground.
+        /// </summary>
+        public virtual float FootPivotOffset => 0f;
+
         public virtual void ApplyMovingExit(Vector3 velocity, float recoveryDelay) { }
 
         public virtual void ApplyMovingExit(MovingExitParams exitParams) =>
             ApplyMovingExit(exitParams.baseVelocity, exitParams.recoveryDelay);
 
-        public virtual Vector3 Velocity => Rigidbody != null ? Rigidbody.velocity : Vector3.zero;
-        public virtual float ForwardSpeed => Rigidbody != null ? Vector3.Dot(Rigidbody.velocity, transform.forward) : 0f;
+        public virtual Vector3 Velocity => UnityCompat.GetLinearVelocity(Rigidbody);
+        public virtual float ForwardSpeed => Vector3.Dot(Velocity, transform.forward);
+        public virtual float CurrentSpeedKmh => Velocity.magnitude * 3.6f;
         public virtual Transform MotionAnchor => transform;
 
         public abstract void CaptureState();

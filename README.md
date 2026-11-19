@@ -5,20 +5,21 @@ A controller-agnostic, zero-dependency, transactional **Mount & Third-Person Int
 Designed to drop cleanly into **any Unity game** with:
 - **Any third-person controller** (Unity Starter Assets, Invector, Opsive, Kinematic Character Controller, or custom `CharacterController` / `Rigidbody` scripts).
 - **Any type of mount** (cars, motorcycles, horses, dragons, boats, helicopters, mechs, turrets, hoverboards).
-- **Any number of mounts & seats** (automatically discovered via a zero-allocation `MountableRegistry`, supporting multi-seat mounts with nearest-seat selection).
+- **Any number of mounts & seats** (automatically discovered via a zero-allocation `MountableRegistry`, supporting multi-seat driver/passenger mounts with seat switching).
 
 ---
 
 ## Key Features
 
-- **Transactional Control Handoff (`ControlSessionCoordinator`)** — Atomic `Validate -> Reserve -> Quiesce -> Prepare -> Commit` transitions with automatic rollback on failure and safe recovery if a mount is destroyed mid-ride.
-- **Zero Third-Party Dependencies** — Compiles cleanly out of the box with no external asset store packages required. Works with both legacy `UnityEngine.UI.Text` and `TextMeshPro` without requiring a compile-time TMP reference.
+- **Transactional Control Handoff (`ControlSessionCoordinator`)** — Atomic `Validate -> Reserve -> Quiesce -> Prepare -> Commit` transitions with automatic rollback, multi-seat switching (`RequestSwitchSeat`), and safe recovery if a mount is destroyed mid-ride.
+- **Zero Third-Party Dependencies & Unity 6 Ready** — Compiles with zero warnings across Unity 2021.3, 2022.3, and Unity 6. Safe in both Legacy Input Manager and New Input System-only projects, and supports both `UnityEngine.UI.Text` and `TextMeshPro` without requiring a compile-time TMP reference.
+- **Scale-Safe, Non-Destructive Attachment (`SeatAttachmentMode.FollowAnchor`)** — Syncs the character to the seat anchor without reparenting by default, preventing non-uniform mount scale distortion and guaranteeing the player survives if the mount is destroyed mid-ride.
 - **GTA-Style Obstacle-Aware Approach (`MountApproachPathResolver`)** — Automatically plans a zero-allocation perimeter path around the mount's colliders to reach the seat's entry anchor, and cancels immediately if the player moves manually.
-- **Safe Exit Clearance Verification** — Probes candidate exit anchors (plus automatic left/right/rear fallbacks) for solid ground, walkable slope angle, character capsule overlap, and capsule sweep clearance before dismounting.
+- **Flexible Exit Safety (`ExitSafetyPolicy`)** — Supports `GroundedOnly` (ground/slope/capsule overlap & sweep checks), `AllowAirborneOrWater` (boats & aircraft), and `Unrestricted`, with automatic `FootPivotOffset` so center-pivoted capsules never sink into the floor.
 - **Moving Exit & Unoccupied Coasting** — Optional high-speed bailout impulses and natural mount coasting deceleration.
-- **Unified Camera & Audio Authority (`CameraAuthority`)** — Supports single shared follow cameras, per-mode rigs, or per-mount custom camera rigs (`ICameraRigProvider`), guaranteeing a single active `MainCamera` and `AudioListener`.
-- **Token-Based Input Suspension (`InputAuthorityRouter`)** — Stackable suspension tokens (`PAUSE`, `MENU`, `CUTSCENE`, `DEATH`, `FOCUS_LOST`) so closing one menu never accidentally re-enables gameplay input while another lock is active.
-- **Desktop, Gamepad, & Mobile UI Ready** — Built-in proximity detection, line-of-sight checks, per-mount action labels & icons, and contextual UI root switching.
+- **Unified Camera & Audio Authority (`CameraAuthority`)** — Supports single shared follow cameras, Cinemachine 2/3 virtual cameras, per-mode rigs, or per-mount custom camera rigs (`ICameraRigProvider`), guaranteeing a single active `MainCamera` and `AudioListener`.
+- **Scene-View Gizmo Authoring** — Visualizes `seatAnchor` (cyan), `entryApproachAnchor` (green), and `exitCandidateAnchors` (yellow) directly in the Unity Scene View.
+- **Token-Based Input Suspension (`InputAuthorityRouter`)** — Stackable suspension tokens (`PAUSE`, `MENU`, `CUTSCENE`, `DEATH`, `FOCUS_LOST`).
 
 ---
 
@@ -41,80 +42,61 @@ Create an empty GameObject named `MountSessionManager` and attach:
 - `MountSessionManager`
 - `MountInteractionPrompt` *(optional: wire a UI prompt panel, text, icon, or mobile button)*
 
-`CameraAuthority`, `InputAuthorityRouter`, and `WorldRelevanceResolver` are automatically attached if not already present.
+`CameraAuthority` and `InputAuthorityRouter` are automatically attached if not already present.
 
 ### 2. Third-Person Character
 On your player character GameObject, attach **`GenericCharacterControlAdapter`**:
 - Add your third-person controller's locomotion/input scripts to **Control Behaviours** (they will be disabled automatically while mounted and re-enabled on dismount).
 - `CharacterController`, `Rigidbody`, `CapsuleCollider`, and `Animator` are auto-detected.
+- Leave **Attachment Mode** on `FollowAnchor` (recommended) to avoid scale warping and survive mount destruction.
 - *(Optional)* Set **Mounted Bool Parameter** / **Seat Index Int Parameter** to drive seated animations, or hook **On Mounted / On Dismounted** UnityEvents.
 
 ### 3. Mounts (Add as Many as You Want)
-On **each** mountable GameObject (car, bike, horse, boat, turret, etc.), attach **`GenericMountControlAdapter`**:
+On **each** mountable GameObject (car, bike, horse, boat, aircraft, turret, etc.), attach **`GenericMountControlAdapter`**:
 - Add your mount's driving/riding/flying scripts to **Control Behaviours** (automatically disabled when unoccupied, enabled when mounted).
 - Add any number of **Seats** in the Inspector:
-  - `seatAnchor` — Transform where the character attaches.
-  - `entryApproachAnchor` — Transform where the character walks before boarding.
-  - `exitCandidateAnchors` — Preferred dismount points (evaluated in order; falls back to left/right/rear if omitted or blocked).
-  - `hideOccupantVisuals` — `true` for enclosed cockpits/cars, `false` for visible riders (horses, motorcycles, open turrets).
-- *(Optional)* Assign a per-mount **Custom Camera Rig**, **Controlled Audio Sources**, **Mobile Controls Root**, **Mount Action Label** (e.g. `"Drive"`, `"Ride"`, `"Pilot"`), and **Mount Icon**.
-
-Every active mount automatically registers itself in `MountableRegistry` on `OnEnable()` and unregisters on `OnDisable()` — no manual scene lists needed.
+  - `seatAnchor` — Transform where the character sits (cyan gizmo).
+  - `entryApproachAnchor` — Transform where the character walks before boarding (green gizmo).
+  - `exitCandidateAnchors` — Preferred dismount points (yellow gizmos; falls back to left/right/rear if omitted or blocked).
+  - `hideOccupantVisuals` — `true` for enclosed cabins/cars, `false` for visible riders (horses, motorcycles, open turrets).
+  - `grantsControlLease` — `true` for driver/pilot seats, `false` for passenger seats.
+- Set **Exit Safety Policy** (`GroundedOnly` for land vehicles/animals, `AllowAirborneOrWater` for boats/aircraft).
+- *(Optional)* Assign a per-mount **Custom Camera Rig** (separate Camera or Cinemachine Virtual Camera), **Controlled Audio Sources**, **Mobile Controls Root**, **Mount Action Label** (e.g. `"Drive"`, `"Ride"`, `"Pilot"`), and **Mount Icon**.
 
 ---
 
-## Extending for Custom Controllers or Mounts
+## New Input System Integration (2 Lines)
 
-### Custom Third-Person Controller Adapter
-Subclass `CharacterControlAdapterBase` (and optionally implement `ICharacterApproachDriver` for custom walk-to-door locomotion):
+In projects using Unity's **New Input System** (`Active Input Handling = Input System Package`), bind your `Interact` and `Move` actions cleanly:
+
+```csharp
+using AkaitoAi.UniversalMountSystem.Adapters;
+using AkaitoAi.UniversalMountSystem.Services;
+
+// Trigger mount/dismount from your Interact InputAction:
+interactAction.performed += _ => MountSessionManager.Instance.InputRouter.TriggerInteraction();
+
+// Allow manual stick/WASD movement to cancel automated walk-to-mount approach:
+characterAdapter.ManualMovementInputProvider = () => moveAction.ReadValue<Vector2>();
+```
+
+---
+
+## Programmatic API
 
 ```csharp
 using AkaitoAi.UniversalMountSystem;
-using UnityEngine;
+using AkaitoAi.UniversalMountSystem.Services;
 
-public class MyCustomCharacterAdapter : CharacterControlAdapterBase
-{
-    public override event System.Action OnCharacterDead;
-    public override bool IsAttached => isAttached;
-    public override bool IsDead => health <= 0f;
-    // Override CaptureState, Attach, Detach, RestoreState, NeutralizeInputs, SetInputActive
-}
-```
-
-### Custom Mount Adapter
-Subclass `MountableControlAdapterBase` for vehicle/mount physics engines that need custom speed telemetry or input neutralization:
-
-```csharp
-using AkaitoAi.UniversalMountSystem;
-using UnityEngine;
-
-public class MyCustomMountAdapter : MountableControlAdapterBase
-{
-    public override float CurrentSpeedKmh => myEngine.SpeedKmh;
-    public override void NeutralizeInputs() { myEngine.SetThrottle(0f); ApplyGenericControlState(false); }
-    public override void SetInputActive(bool active) { myEngine.CanControl = active && HasLease; ApplyGenericControlState(active && HasLease); }
-}
-```
-
-### Custom Camera Scripts
-Implement `ICameraTargetable` on any camera script so `CameraAuthority` retargets it automatically (Cinemachine `Follow`, `SetTarget`, `SetMainTarget`, and `target` fields are also supported automatically via cached reflection):
-
-```csharp
-using AkaitoAi.UniversalMountSystem;
-using UnityEngine;
-
-public class MyCamera : MonoBehaviour, ICameraTargetable
-{
-    public void SetCameraTarget(Transform target) => followTarget = target;
-}
-```
-
-### Programmatic API
-
-```csharp
 // Mount a specific target (or specific seat)
 MountSessionManager.Instance.RequestEnter(mountAdapter);
 MountSessionManager.Instance.RequestEnter(mountAdapter, mountAdapter.Seats[1]);
+
+// Start a level/race already seated (bypasses distance/LoS/speed checks)
+MountSessionManager.Instance.ForceEnter(mountAdapter);
+
+// Switch seats while mounted (e.g. Passenger -> Driver)
+MountSessionManager.Instance.RequestSwitchSeat(mountAdapter.Seats[0]);
 
 // Dismount
 MountSessionManager.Instance.RequestExit();
@@ -126,55 +108,32 @@ MountSessionManager.Instance.InputRouter.ResumeInput("PAUSE_MENU");
 // Subscribe to lifecycle events
 MountSessionManager.Instance.OnMountEntered += (target, seat) => { /* ... */ };
 MountSessionManager.Instance.OnMountExited += (target) => { /* ... */ };
+MountSessionManager.Instance.OnTransitionFailed += (txId, reason, mode) => { /* ... */ };
 ```
 
 ---
 
-## Package Structure
+## Extending for Custom Controllers or Mounts
 
+### Custom Third-Person Controller Adapter
+Subclass `CharacterControlAdapterBase` (and optionally implement `ICharacterApproachDriver` for custom walk-to-door locomotion).
+
+### Custom Mount Adapter
+Subclass `MountableControlAdapterBase` and override `CurrentSpeedKmh`, `NeutralizeInputs()`, and `SetInputActive(bool)`:
+
+```csharp
+using AkaitoAi.UniversalMountSystem;
+
+public class MyCustomMountAdapter : MountableControlAdapterBase
+{
+    public override float CurrentSpeedKmh => myEngine.SpeedKmh;
+    public override void NeutralizeInputs() { myEngine.SetThrottle(0f); ApplyGenericControlState(false); }
+    public override void SetInputActive(bool active) { myEngine.CanControl = active && HasLease; ApplyGenericControlState(active && HasLease); }
+}
 ```
-├── package.json
-├── LICENSE (MIT)
-├── README.md
-├── Runtime/
-│   ├── AkaitoAi.UniversalMountSystem.asmdef
-│   ├── Core/
-│   │   ├── ControlContext.cs
-│   │   ├── ControlMode.cs
-│   │   ├── ControlSessionCoordinator.cs
-│   │   ├── ControlTargetAdapterBase.cs
-│   │   ├── ControlTransitionResult.cs
-│   │   ├── CharacterControlAdapterBase.cs
-│   │   ├── ICameraRigAdapter.cs
-│   │   ├── ICharacterApproachDriver.cs
-│   │   ├── ICharacterAttachment.cs
-│   │   ├── IControlCapability.cs
-│   │   ├── IControlTarget.cs
-│   │   ├── IMotionTelemetry.cs
-│   │   ├── IMountable.cs
-│   │   ├── IRemoteControllable.cs
-│   │   ├── MountSeat.cs
-│   │   └── MountableControlAdapterBase.cs
-│   ├── Configuration/
-│   │   └── MountSessionSettingsSO.cs
-│   ├── Services/
-│   │   ├── CameraAuthority.cs
-│   │   ├── InputAuthorityRouter.cs
-│   │   ├── MountApproachPathResolver.cs
-│   │   ├── MountSessionManager.cs
-│   │   └── WorldRelevanceResolver.cs
-│   ├── Adapters/
-│   │   ├── GenericCharacterControlAdapter.cs
-│   │   └── GenericMountControlAdapter.cs
-│   └── UI/
-│       └── MountInteractionPrompt.cs
-└── Samples~/
-    └── BasicSetup/
-        ├── README.md
-        ├── SimpleFollowCamera.cs
-        ├── SimpleMountController.cs
-        └── SimpleThirdPersonController.cs
-```
+
+### Custom Camera Scripts
+Implement `ICameraTargetable` on any camera script so `CameraAuthority` retargets it automatically (Cinemachine 2 `Follow`/`LookAt`, Cinemachine 3 `Target.TrackingTarget`, `SetTarget`, `SetMainTarget`, and `target` fields are also supported automatically via cached reflection).
 
 ---
 
